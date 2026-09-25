@@ -18,20 +18,27 @@ import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.os.Binder;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.os.SystemClock;
+import android.view.MotionEvent;
 import android.view.Surface;
 
+import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** Local video/display experiment. No QDLink USB transport is included. */
+/**
+ * Independent LeapBox car display. The phone's visible UI is never captured.
+ */
 public final class SecondScreenService extends Service {
     static final String ACTION_START = "com.leapbox.prototype.START";
     static final String ACTION_STOP = "com.leapbox.prototype.STOP";
     private static final String CHANNEL = "leapbox_display";
     private static final int NOTIFICATION = 21;
-    private static final int WIDTH = 1280;
-    private static final int HEIGHT = 720;
+    private static final int WIDTH = 1920;
+    private static final int HEIGHT = 882;
+    private static final int FPS = 24;
 
     final class LocalBinder extends Binder {
         SecondScreenService getService() { return SecondScreenService.this; }
@@ -46,8 +53,11 @@ public final class SecondScreenService extends Service {
     private Surface encoderSurface;
     private VirtualDisplay virtualDisplay;
     private CarDashboardPresentation dashboard;
-    private PowerManager.WakeLock fullWakeLock;
+    private PowerManager.WakeLock backgroundWakeLock;
     private Thread drainThread;
+    private QdLinkUsbClient qdLink;
+    private volatile byte[] codecConfig;
+    private volatile long lastTouchDownTime;
 
     @Override public IBinder onBind(Intent intent) { return binder; }
 
@@ -60,27 +70,30 @@ public final class SecondScreenService extends Service {
             startVisibleService();
             try {
                 createScreen();
+                startCarBridge();
             } catch (Exception | LinkageError error) {
                 status = "Display failed: " + error.getClass().getSimpleName() + ": " + error.getMessage();
                 releaseScreen();
                 stopSelf();
             }
+        } else if (qdLink == null) {
+            startCarBridge();
         }
-        return START_NOT_STICKY;
+        return START_STICKY;
     }
 
     private void startVisibleService() {
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (Build.VERSION.SDK_INT >= 26) {
             manager.createNotificationChannel(new NotificationChannel(
-                    CHANNEL, "LeapBox display", NotificationManager.IMPORTANCE_LOW));
+                    CHANNEL, "LeapBox car display", NotificationManager.IMPORTANCE_LOW));
         }
         Intent launch = new Intent(this, MainActivity.class);
         PendingIntent pending = PendingIntent.getActivity(this, 0, launch,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Notification notification = new Notification.Builder(this, CHANNEL)
-                .setContentTitle("LeapBox display is active")
-                .setContentText("Separate display experiment; tap to return")
+                .setContentTitle("LeapBox car display is active")
+                .setContentText("Phone remains independent while C10 projection runs")
                 .setSmallIcon(R.drawable.ic_leapbox)
                 .setContentIntent(pending)
                 .setOngoing(true)
@@ -95,15 +108,15 @@ public final class SecondScreenService extends Service {
     @SuppressWarnings("deprecation")
     private void createScreen() throws Exception {
         PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
-        fullWakeLock = power.newWakeLock(PowerManager.FULL_WAKE_LOCK, "LeapBox:SecondDisplay");
-        fullWakeLock.setReferenceCounted(false);
-        fullWakeLock.acquire();
+        backgroundWakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LeapBox:CarDisplay");
+        backgroundWakeLock.setReferenceCounted(false);
+        backgroundWakeLock.acquire();
 
         MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, WIDTH, HEIGHT);
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT,
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
         format.setInteger(MediaFormat.KEY_BIT_RATE, 2_500_000);
-        format.setInteger(MediaFormat.KEY_FRAME_RATE, 24);
+        format.setInteger(MediaFormat.KEY_FRAME_RATE, FPS);
         format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2);
         encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
         encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
@@ -115,7 +128,7 @@ public final class SecondScreenService extends Service {
         int displayFlags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
                 | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
                 | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY;
-        virtualDisplay = displayManager.createVirtualDisplay("LeapBox navigation", WIDTH, HEIGHT,
+        virtualDisplay = displayManager.createVirtualDisplay("LeapBox car desktop", WIDTH, HEIGHT,
                 density, encoderSurface, displayFlags);
         if (virtualDisplay == null) throw new IllegalStateException("Virtual display unavailable");
 
@@ -123,8 +136,29 @@ public final class SecondScreenService extends Service {
         encoding = true;
         drainThread = new Thread(this::drainFrames, "LeapBox-H264-output");
         drainThread.start();
-        status = "Display #" + virtualDisplay.getDisplay().getDisplayId()
-                + " ready; H.264 is local only";
+        status = "LeapBox desktop ready on display #" + virtualDisplay.getDisplay().getDisplayId();
+    }
+
+    private void startCarBridge() {
+        if (qdLink != null) return;
+        qdLink = new QdLinkUsbClient(this, new QdLinkUsbClient.Listener() {
+            @Override public void onStatusChanged() { }
+
+            @Override public void onVideoRequested() {
+                sendCodecConfig();
+                requestSyncFrame();
+            }
+
+            @Override public void onKeyFrameRequested() {
+                sendCodecConfig();
+                requestSyncFrame();
+            }
+
+            @Override public void onCarTouch(float x, float y, int action, int carWidth, int carHeight) {
+                dispatchCarTouch(x, y, action, carWidth, carHeight);
+            }
+        });
+        qdLink.start();
     }
 
     private void drainFrames() {
@@ -132,10 +166,28 @@ public final class SecondScreenService extends Service {
         while (encoding) {
             try {
                 int index = encoder.dequeueOutputBuffer(info, 100_000);
+                if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    cacheCodecConfig(encoder.getOutputFormat());
+                    continue;
+                }
                 if (index >= 0) {
-                    if (info.size > 0 && (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
-                        frames.incrementAndGet();
-                        bytes.addAndGet(info.size);
+                    if (info.size > 0) {
+                        ByteBuffer buffer = encoder.getOutputBuffer(index);
+                        if (buffer != null) {
+                            buffer.position(info.offset);
+                            buffer.limit(info.offset + info.size);
+                            byte[] data = new byte[info.size];
+                            buffer.get(data);
+                            boolean config = (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
+                            if (config) {
+                                codecConfig = data;
+                            } else {
+                                frames.incrementAndGet();
+                                bytes.addAndGet(info.size);
+                                QdLinkUsbClient bridge = qdLink;
+                                if (bridge != null) bridge.sendVideo(data, WIDTH, HEIGHT, FPS);
+                            }
+                        }
                     }
                     encoder.releaseOutputBuffer(index, false);
                 }
@@ -146,16 +198,81 @@ public final class SecondScreenService extends Service {
         }
     }
 
+    private void cacheCodecConfig(MediaFormat outputFormat) {
+        ByteBuffer sps = outputFormat.getByteBuffer("csd-0");
+        ByteBuffer pps = outputFormat.getByteBuffer("csd-1");
+        if (sps == null && pps == null) return;
+        byte[] spsBytes = copyRemaining(sps);
+        byte[] ppsBytes = copyRemaining(pps);
+        byte[] combined = new byte[spsBytes.length + ppsBytes.length];
+        System.arraycopy(spsBytes, 0, combined, 0, spsBytes.length);
+        System.arraycopy(ppsBytes, 0, combined, spsBytes.length, ppsBytes.length);
+        codecConfig = combined;
+    }
+
+    private static byte[] copyRemaining(ByteBuffer source) {
+        if (source == null) return new byte[0];
+        ByteBuffer copy = source.duplicate();
+        byte[] bytes = new byte[copy.remaining()];
+        copy.get(bytes);
+        return bytes;
+    }
+
+    private void sendCodecConfig() {
+        byte[] config = codecConfig;
+        QdLinkUsbClient bridge = qdLink;
+        if (bridge != null && config != null && config.length > 0) {
+            bridge.sendVideo(config, WIDTH, HEIGHT, FPS);
+        }
+    }
+
+    private void requestSyncFrame() {
+        MediaCodec codec = encoder;
+        if (codec == null) return;
+        try {
+            Bundle params = new Bundle();
+            params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
+            codec.setParameters(params);
+        } catch (IllegalStateException ignored) { }
+    }
+
+    private void dispatchCarTouch(float carX, float carY, int action,
+                                  int sourceWidth, int sourceHeight) {
+        CarDashboardPresentation presentation = dashboard;
+        if (presentation == null || virtualDisplay == null) return;
+        float x = carX * WIDTH / Math.max(1f, sourceWidth);
+        float y = carY * HEIGHT / Math.max(1f, sourceHeight);
+        long now = SystemClock.uptimeMillis();
+        if (action == MotionEvent.ACTION_DOWN || lastTouchDownTime == 0) lastTouchDownTime = now;
+        MotionEvent event = MotionEvent.obtain(lastTouchDownTime, now, action, x, y, 0);
+        presentation.dispatchCarTouch(event);
+        event.recycle();
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) lastTouchDownTime = 0;
+    }
+
     boolean isReady() { return virtualDisplay != null; }
     int displayId() { return virtualDisplay == null ? -1 : virtualDisplay.getDisplay().getDisplayId(); }
-    boolean isAwake() { return fullWakeLock != null && fullWakeLock.isHeld(); }
+    boolean isAwake() { return backgroundWakeLock != null && backgroundWakeLock.isHeld(); }
     long framesEncoded() { return frames.get(); }
     long bytesEncoded() { return bytes.get(); }
     String status() { return status; }
+    String carStatus() { return qdLink == null ? "QDLink USB: not started" : qdLink.status(); }
+    boolean carConnected() { return qdLink != null && qdLink.isConnected(); }
+    boolean carPlaying() { return qdLink != null && qdLink.isPlaying(); }
+    String carProtocol() { return qdLink == null ? "unknown" : qdLink.protocol(); }
+    int carWidth() { return qdLink == null ? 0 : qdLink.carWidth(); }
+    int carHeight() { return qdLink == null ? 0 : qdLink.carHeight(); }
+    long carFramesSent() { return qdLink == null ? 0 : qdLink.videoFramesSent(); }
+    long carTouchEvents() { return qdLink == null ? 0 : qdLink.touchEventsReceived(); }
+
+    void reconnectCar() {
+        if (qdLink == null) startCarBridge();
+        else qdLink.reconnect();
+    }
 
     void stopPrototype() {
         releaseScreen();
-        status = "Stopped; wake lock released";
+        status = "Stopped; background wake lock released";
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
@@ -167,9 +284,14 @@ public final class SecondScreenService extends Service {
         status = "LeapBox desktop on display #" + displayId();
     }
 
-    /** Called by the phone UI or the icon on the secondary display. */
+    String dashboardWazeSelected() {
+        status = "Waze selected on LeapBox desktop; independent C10 touch path works";
+        return "Waze selected · Android Auto stage comes next";
+    }
+
+    /** Diagnostic only: Android may reject a normal third-party app on this virtual display. */
     String launchWaze(Context caller) {
-        if (virtualDisplay == null) return "Start the second-screen lab first.";
+        if (virtualDisplay == null) return "Start LeapBox first.";
         if (!getPackageManager().hasSystemFeature(
                 PackageManager.FEATURE_ACTIVITIES_ON_SECONDARY_DISPLAYS)) {
             return "This phone does not advertise activities on secondary displays.";
@@ -179,7 +301,7 @@ public final class SecondScreenService extends Service {
         int id = displayId();
         ActivityManager activities = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
         if (!activities.isActivityStartAllowedOnDisplay(caller, id, waze)) {
-            return "Android blocked Waze on display #" + id + ".";
+            return "Android blocked normal Waze on display #" + id + "; Android Auto bridge will be used instead.";
         }
         waze.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         ActivityOptions options = ActivityOptions.makeBasic().setLaunchDisplayId(id);
@@ -199,6 +321,10 @@ public final class SecondScreenService extends Service {
 
     private void releaseScreen() {
         encoding = false;
+        if (qdLink != null) {
+            qdLink.stop();
+            qdLink = null;
+        }
         if (dashboard != null) {
             dashboard.dismiss();
             dashboard = null;
@@ -221,9 +347,10 @@ public final class SecondScreenService extends Service {
             encoderSurface.release();
             encoderSurface = null;
         }
-        if (fullWakeLock != null) {
-            if (fullWakeLock.isHeld()) fullWakeLock.release();
-            fullWakeLock = null;
+        codecConfig = null;
+        if (backgroundWakeLock != null) {
+            if (backgroundWakeLock.isHeld()) backgroundWakeLock.release();
+            backgroundWakeLock = null;
         }
     }
 

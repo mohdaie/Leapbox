@@ -8,23 +8,29 @@
 
     <queries>
         <package android:name="com.waze" />
-        <package android:name="com.neusoft.qdrivelink" />
     </queries>
 
     <application
         android:allowBackup="false"
-        android:label="LeapBox Prototype"
+        android:label="LeapBox"
         android:icon="@drawable/ic_leapbox"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:usesCleartextTraffic="false">
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:resizeableActivity="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED"
+                android:resource="@xml/accessory_filter" />
         </activity>
 
         <service
@@ -33,7 +39,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-started virtual navigation display and screen-awake prototype" />
+                android:value="User-started independent car display, QDLink USB transport, and navigation projection" />
         </service>
     </application>
 </manifest>

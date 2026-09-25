@@ -13,7 +13,6 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.view.View;
-import android.view.WindowManager;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -24,7 +23,6 @@ import java.util.Locale;
 public final class MainActivity extends Activity {
     private SecondScreenService screen;
     private boolean bound;
-    private boolean dimPhone;
     private TextView status;
     private String accessoryStatus = "USB accessory: not checked";
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -43,14 +41,22 @@ public final class MainActivity extends Activity {
     private final Runnable update = new Runnable() {
         @Override public void run() {
             refresh();
-            handler.postDelayed(this, 1200);
+            handler.postDelayed(this, 1000);
         }
     };
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         buildInterface();
+        if (UsbManager.ACTION_USB_ACCESSORY_ATTACHED.equals(getIntent().getAction())) {
+            startLeapBox();
+        }
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (UsbManager.ACTION_USB_ACCESSORY_ATTACHED.equals(intent.getAction())) startLeapBox();
     }
 
     @Override protected void onStart() {
@@ -79,42 +85,36 @@ public final class MainActivity extends Activity {
                 Ui.dp(this, 23), Ui.dp(this, 34));
         scroll.addView(root);
 
-        TextView eyebrow = Ui.text(this, "LEAPBOX  /  PROTOTYPE 01", 13, Ui.BLUE, true);
-        root.addView(eyebrow);
-        TextView heading = Ui.text(this, "Your road. Your screen.", 30, Ui.INK, true);
-        root.addView(heading, Ui.block(this, 10));
-        TextView introduction = Ui.text(this,
-                "Two paths to test: your current QDLink mirror and a separate Android display.",
-                16, Ui.MUTED, false);
-        root.addView(introduction, Ui.block(this, 8));
+        root.addView(Ui.text(this, "LEAPBOX  /  PROTOTYPE 02", 13, Ui.BLUE, true));
+        root.addView(Ui.text(this, "One phone. Two independent screens.", 29, Ui.INK, true),
+                Ui.block(this, 10));
+        root.addView(Ui.text(this,
+                "LeapBox sends its own dashboard to the C10. Your physical phone screen is not captured and can be locked or used normally.",
+                16, Ui.MUTED, false), Ui.block(this, 8));
 
-        addSection(root, "01  DRIVE WITH QDLINK",
-                "Connect using your installed QDLink app, return here to see this home screen in the car, then tap Waze. This mirrors the phone.");
-        root.addView(action("Open QDLink", Ui.BLUE, () -> launchPackage("com.neusoft.qdrivelink")),
+        addSection(root, "01  LEAPBOX → C10",
+                "Open QDLink on the C10, connect the USB cable, then start LeapBox. Do not open the QDLink phone app; LeapBox now tries to own the QDriveLink USB accessory itself.");
+        root.addView(action("Start LeapBox car desktop", Ui.BLUE, this::startLeapBox),
                 Ui.block(this, 17));
-        root.addView(action("↗  Open Waze on phone", Ui.INK,
-                () -> launchPackage("com.waze")), Ui.block(this, 10));
-
-        addSection(root, "02  SEPARATE SCREEN LAB",
-                "Creates its own landscape dashboard and H.264 stream. The stream is local: it is not yet connected to the C10.");
-        root.addView(action("Start second screen + full wake lock", Ui.BLUE,
-                this::startScreen), Ui.block(this, 17));
+        root.addView(action("Reconnect QDLink USB", Ui.MUTED,
+                () -> { if (screen != null) screen.reconnectCar(); else startLeapBox(); }), Ui.block(this, 10));
         root.addView(action("Inspect connected car USB", Ui.MUTED,
                 this::inspectUsb), Ui.block(this, 10));
-        root.addView(action("↗  Try Waze on second screen", Ui.INK,
-                this::launchWazeOnSecond), Ui.block(this, 10));
-        root.addView(action("Return to LeapBox desktop", Ui.MUTED,
+
+        addSection(root, "02  INDEPENDENT SCREEN TEST",
+                "The C10 should show the LeapBox desktop with one Waze icon. While it stays there, use ChatGPT, WhatsApp, Camera or anything else on the phone.");
+        root.addView(action("↗  Diagnostic: try normal Waze on car display", Ui.INK,
+                this::launchWazeOnSecond), Ui.block(this, 17));
+        root.addView(action("Return car to LeapBox desktop", Ui.MUTED,
                 () -> { if (screen != null) screen.showDashboard(); refresh(); }),
                 Ui.block(this, 10));
 
-        addSection(root, "03  PHONE POWER",
-                "Full wake lock keeps the phone awake. Low brightness only dims this phone window; it does not turn the display off.");
-        root.addView(action("Toggle low phone brightness", Ui.MUTED,
-                this::toggleBrightness), Ui.block(this, 17));
-        root.addView(action("Stop second screen and release wake lock", Ui.INK,
-                this::stopScreen), Ui.block(this, 10));
+        addSection(root, "03  PHONE INDEPENDENCE",
+                "LeapBox now uses a background partial wake lock. It keeps the projection engine alive without deliberately keeping your phone display on.");
+        root.addView(action("Stop LeapBox", Ui.INK,
+                this::stopScreen), Ui.block(this, 17));
 
-        status = Ui.text(this, "Checking display service…", 14, Ui.INK, false);
+        status = Ui.text(this, "Checking LeapBox service…", 14, Ui.INK, false);
         status.setPadding(Ui.dp(this, 17), Ui.dp(this, 17),
                 Ui.dp(this, 17), Ui.dp(this, 17));
         status.setBackground(Ui.rounded(Color.WHITE, this, 16));
@@ -135,27 +135,27 @@ public final class MainActivity extends Activity {
         return button;
     }
 
-    private void startScreen() {
+    private void startLeapBox() {
         try {
             Intent intent = new Intent(this, SecondScreenService.class).setAction(
                     SecondScreenService.ACTION_START);
             startForegroundService(intent);
-            tell("Starting separate display…");
+            tell("Starting independent LeapBox car session…");
         } catch (RuntimeException error) {
-            tell("Cannot start display: " + error.getClass().getSimpleName());
+            tell("Cannot start LeapBox: " + error.getClass().getSimpleName());
         }
     }
 
     private void stopScreen() {
         if (screen != null) screen.stopPrototype();
         else stopService(new Intent(this, SecondScreenService.class));
-        tell("Separate display stopped; wake lock released.");
+        tell("LeapBox stopped.");
         refresh();
     }
 
     private void launchWazeOnSecond() {
         if (screen == null) {
-            tell("Start the second-screen lab first.");
+            tell("Start LeapBox first.");
             return;
         }
         tell(screen.launchWaze(this));
@@ -170,48 +170,36 @@ public final class MainActivity extends Activity {
         } else {
             UsbAccessory car = accessories[0];
             accessoryStatus = "USB accessory: " + car.getManufacturer() + " / "
-                    + car.getModel() + " / " + car.getVersion();
+                    + car.getModel() + " / " + car.getVersion()
+                    + " · permission=" + usb.hasPermission(car);
         }
         tell(accessoryStatus);
         refresh();
     }
 
-    private void launchPackage(String packageName) {
-        Intent launch = getPackageManager().getLaunchIntentForPackage(packageName);
-        if (launch == null) {
-            tell(packageName.equals("com.waze") ? "Install Waze first." : "Install QDLink first.");
-            return;
-        }
-        try {
-            startActivity(launch);
-        } catch (RuntimeException error) {
-            tell("Could not open app: " + error.getClass().getSimpleName());
-        }
-    }
-
-    private void toggleBrightness() {
-        dimPhone = !dimPhone;
-        WindowManager.LayoutParams attributes = getWindow().getAttributes();
-        attributes.screenBrightness = dimPhone ? 0.04f : -1f;
-        getWindow().setAttributes(attributes);
-        tell(dimPhone ? "Low brightness requested for this phone window."
-                : "Normal phone brightness restored.");
-    }
-
     private void refresh() {
         if (status == null) return;
         if (screen == null || !screen.isReady()) {
-            status.setText("Second screen: inactive\nCar stream: not connected\n"
-                    + "QDLink mirror: available through your existing app\n"
-                    + accessoryStatus + "\n"
-                    + (screen == null ? "" : screen.status()));
+            status.setText("LeapBox display: inactive\nPhone display: independent\n"
+                    + accessoryStatus + "\nStart LeapBox after opening QDLink on the C10.");
             return;
         }
+        String canvas = screen.carWidth() > 0
+                ? screen.carWidth() + "×" + screen.carHeight() : "unknown";
         status.setText(String.format(Locale.US,
-                "Second screen: #%d\nFull wake lock: %s\nEncoded locally: %,d frames (%.1f MB)\nCar stream: not connected\n%s\n%s",
+                "LeapBox display: #%d · 1920×882\n"
+                        + "Phone display: independent / may lock\n"
+                        + "Background wake: %s\n"
+                        + "Encoded locally: %,d frames (%.1f MB)\n"
+                        + "QDLink: %s · protocol %s · car canvas %s\n"
+                        + "Car video requested: %s · sent %,d frames\n"
+                        + "C10 touch events: %,d\n"
+                        + "%s\n%s",
                 screen.displayId(), screen.isAwake() ? "held" : "not held",
                 screen.framesEncoded(), screen.bytesEncoded() / 1_000_000.0,
-                accessoryStatus, screen.status()));
+                screen.carConnected() ? "connected" : "not connected", screen.carProtocol(), canvas,
+                screen.carPlaying() ? "yes" : "no", screen.carFramesSent(),
+                screen.carTouchEvents(), accessoryStatus, screen.carStatus()));
     }
 
     private void tell(String message) {
