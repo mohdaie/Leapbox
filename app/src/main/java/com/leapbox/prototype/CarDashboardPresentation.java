@@ -67,7 +67,7 @@ final class CarDashboardPresentation extends Presentation {
         root.addView(card, Ui.block(context, 30));
 
         TextView footer = Ui.text(context,
-                "LEAPBOX 0.2  ·  INDEPENDENT DISPLAY  ·  QDLINK USB", 13,
+                "LEAPBOX 0.3  ·  INDEPENDENT DISPLAY  ·  QDLINK USB", 13,
                 Color.rgb(158, 174, 194), true);
         root.addView(footer, Ui.block(context, 26));
         setContentView(root);

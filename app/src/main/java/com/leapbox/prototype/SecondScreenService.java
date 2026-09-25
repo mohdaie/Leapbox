@@ -19,7 +19,9 @@ import android.media.MediaFormat;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.view.MotionEvent;
@@ -34,6 +36,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class SecondScreenService extends Service {
     static final String ACTION_START = "com.leapbox.prototype.START";
     static final String ACTION_STOP = "com.leapbox.prototype.STOP";
+    static final String ACTION_ACCESSORY = "com.leapbox.prototype.ACCESSORY_ATTACHED";
     private static final String CHANNEL = "leapbox_display";
     private static final int NOTIFICATION = 21;
     private static final int WIDTH = 1920;
@@ -45,6 +48,7 @@ public final class SecondScreenService extends Service {
     }
 
     private final IBinder binder = new LocalBinder();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final AtomicLong frames = new AtomicLong();
     private final AtomicLong bytes = new AtomicLong();
     private volatile String status = "Not started";
@@ -78,6 +82,8 @@ public final class SecondScreenService extends Service {
             }
         } else if (qdLink == null) {
             startCarBridge();
+        } else if (intent != null && ACTION_ACCESSORY.equals(intent.getAction())) {
+            qdLink.accessoryAttached();
         }
         return START_STICKY;
     }
@@ -118,6 +124,9 @@ public final class SecondScreenService extends Service {
         format.setInteger(MediaFormat.KEY_BIT_RATE, 2_500_000);
         format.setInteger(MediaFormat.KEY_FRAME_RATE, FPS);
         format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2);
+        // A mostly static dashboard otherwise yields almost no frames, leaving the car without
+        // a picture after connecting or requesting a key frame.
+        format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 1_000_000L / FPS);
         encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
         encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
         encoderSurface = encoder.createInputSurface();
@@ -155,7 +164,8 @@ public final class SecondScreenService extends Service {
             }
 
             @Override public void onCarTouch(float x, float y, int action, int carWidth, int carHeight) {
-                dispatchCarTouch(x, y, action, carWidth, carHeight);
+                // Arrives on the USB reader thread; views may only be touched on the main thread.
+                mainHandler.post(() -> dispatchCarTouch(x, y, action, carWidth, carHeight));
             }
         });
         qdLink.start();
@@ -264,6 +274,8 @@ public final class SecondScreenService extends Service {
     int carHeight() { return qdLink == null ? 0 : qdLink.carHeight(); }
     long carFramesSent() { return qdLink == null ? 0 : qdLink.videoFramesSent(); }
     long carTouchEvents() { return qdLink == null ? 0 : qdLink.touchEventsReceived(); }
+    String usbState() { return qdLink == null ? "" : qdLink.usbState(); }
+    String carLog() { return qdLink == null ? "" : qdLink.logText(); }
 
     void reconnectCar() {
         if (qdLink == null) startCarBridge();
@@ -355,6 +367,7 @@ public final class SecondScreenService extends Service {
     }
 
     @Override public void onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null);
         releaseScreen();
         super.onDestroy();
     }
