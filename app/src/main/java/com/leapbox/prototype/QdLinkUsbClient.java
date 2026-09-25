@@ -48,7 +48,7 @@ final class QdLinkUsbClient {
     private static final String ACTION_USB_STATE = "android.hardware.usb.action.USB_STATE";
     private static final long RETRY_MS = 3000;
     private static final int LOG_LINES = 80;
-    static final String VERSION = "0.3.0";
+    static final String VERSION = "0.3.1";
     private static final int USB_CHUNK = 512;
     private static final int MAX_MESSAGE = 8 * 1024 * 1024;
 
@@ -62,6 +62,7 @@ final class QdLinkUsbClient {
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicLong videoFrames = new AtomicLong();
     private final AtomicLong touchEvents = new AtomicLong();
+    private final AtomicLong keyFrames = new AtomicLong();
 
     private ParcelFileDescriptor descriptor;
     private FileInputStream input;
@@ -143,6 +144,7 @@ final class QdLinkUsbClient {
     String protocol() { return protocol; }
     long videoFramesSent() { return videoFrames.get(); }
     long touchEventsReceived() { return touchEvents.get(); }
+    long keyFramesSent() { return keyFrames.get(); }
     String status() { return status; }
     String usbState() { return usbState; }
 
@@ -150,14 +152,19 @@ final class QdLinkUsbClient {
         synchronized (log) { return String.join("\n", log); }
     }
 
-    boolean sendVideo(byte[] h264, int width, int height, int frameRate) {
+    boolean sendVideo(byte[] h264, int width, int height, int frameRate, boolean keyFrame) {
         if (!connected || !playing || output == null || h264 == null || h264.length == 0) {
             return false;
         }
         if (!"v2".equals(protocol)) return false;
         try {
             writePadded(buildVideoPacket(h264, width, height, frameRate));
-            videoFrames.incrementAndGet();
+            long sent = videoFrames.incrementAndGet();
+            long keys = keyFrame ? keyFrames.incrementAndGet() : keyFrames.get();
+            if (sent <= 3 || (keyFrame && keys <= 10)) {
+                log("phone → video #" + sent + (keyFrame ? " KEY" : "") + " " + h264.length
+                        + " B: " + hexPrefix(h264, 8));
+            }
             return true;
         } catch (IOException error) {
             sessionFailed("video write failed", error);
@@ -363,6 +370,8 @@ final class QdLinkUsbClient {
                 if (playing && listener != null) listener.onVideoRequested();
                 break;
             case "KEY_FRAME_REQ":
+                log("key frame requested; sent so far " + videoFrames.get() + " frames, "
+                        + keyFrames.get() + " key");
                 if (listener != null) listener.onKeyFrameRequested();
                 break;
             case "HEARTBEAT":

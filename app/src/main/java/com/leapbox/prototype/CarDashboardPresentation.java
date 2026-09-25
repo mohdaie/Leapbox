@@ -2,7 +2,9 @@ package com.leapbox.prototype;
 
 import android.app.Presentation;
 import android.content.Context;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
 import android.os.Bundle;
 import android.view.Display;
 import android.view.Gravity;
@@ -66,11 +68,36 @@ final class CarDashboardPresentation extends Presentation {
         card.setOnClickListener(view -> result.setText(service.dashboardWazeSelected()));
         root.addView(card, Ui.block(context, 30));
 
+        root.addView(new LiveBar(context), new LinearLayout.LayoutParams(-1, Ui.dp(context, 4)));
+
         TextView footer = Ui.text(context,
                 "LEAPBOX 0.3  ·  INDEPENDENT DISPLAY  ·  QDLINK USB", 13,
                 Color.rgb(158, 174, 194), true);
         root.addView(footer, Ui.block(context, 26));
         setContentView(root);
+    }
+
+    /**
+     * A virtual display only produces frames when its content changes, and many encoders ignore
+     * KEY_REPEAT_PREVIOUS_FRAME_AFTER. This bar redraws at the stream frame rate so the encoder
+     * always has input (and can answer key-frame requests); on the car it proves video is live.
+     */
+    private static final class LiveBar extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final long frameMs = 1000L / SecondScreenService.FPS;
+
+        LiveBar(Context context) {
+            super(context);
+            paint.setColor(Color.rgb(83, 215, 197));
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            float width = getWidth();
+            float segment = width / 5f;
+            float x = (android.os.SystemClock.uptimeMillis() % 3000) / 3000f * (width + segment) - segment;
+            canvas.drawRect(x, 0, x + segment, getHeight(), paint);
+            postInvalidateDelayed(frameMs);
+        }
     }
 
     void dispatchCarTouch(MotionEvent event) {

@@ -230,14 +230,14 @@ public final class MainActivity extends Activity {
                         + "Encoded locally: %,d frames (%.1f MB)\n"
                         + "QDLink: %s · protocol %s · car canvas %s\n"
                         + "%s\n"
-                        + "Car video requested: %s · sent %,d frames\n"
+                        + "Car video requested: %s · sent %,d frames (%,d key)\n"
                         + "C10 touch events: %,d\n"
                         + "%s\n%s",
                 screen.displayId(), screen.isAwake() ? "held" : "not held",
                 screen.framesEncoded(), screen.bytesEncoded() / 1_000_000.0,
                 screen.carConnected() ? "connected" : "not connected", screen.carProtocol(), canvas,
                 screen.usbState(),
-                screen.carPlaying() ? "yes" : "no", screen.carFramesSent(),
+                screen.carPlaying() ? "yes" : "no", screen.carFramesSent(), screen.carKeyFrames(),
                 screen.carTouchEvents(), accessoryStatus, screen.carStatus()));
     }
 

@@ -41,7 +41,7 @@ public final class SecondScreenService extends Service {
     private static final int NOTIFICATION = 21;
     private static final int WIDTH = 1920;
     private static final int HEIGHT = 882;
-    private static final int FPS = 24;
+    static final int FPS = 24;
 
     final class LocalBinder extends Binder {
         SecondScreenService getService() { return SecondScreenService.this; }
@@ -154,12 +154,10 @@ public final class SecondScreenService extends Service {
             @Override public void onStatusChanged() { }
 
             @Override public void onVideoRequested() {
-                sendCodecConfig();
                 requestSyncFrame();
             }
 
             @Override public void onKeyFrameRequested() {
-                sendCodecConfig();
                 requestSyncFrame();
             }
 
@@ -189,13 +187,18 @@ public final class SecondScreenService extends Service {
                             byte[] data = new byte[info.size];
                             buffer.get(data);
                             boolean config = (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
+                            boolean key = (info.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0;
                             if (config) {
                                 codecConfig = data;
                             } else {
                                 frames.incrementAndGet();
                                 bytes.addAndGet(info.size);
                                 QdLinkUsbClient bridge = qdLink;
-                                if (bridge != null) bridge.sendVideo(data, WIDTH, HEIGHT, FPS);
+                                if (bridge != null) {
+                                    // Car decoders commonly need SPS/PPS in front of every IDR frame.
+                                    bridge.sendVideo(key ? withCodecConfig(data) : data,
+                                            WIDTH, HEIGHT, FPS, key);
+                                }
                             }
                         }
                     }
@@ -228,12 +231,13 @@ public final class SecondScreenService extends Service {
         return bytes;
     }
 
-    private void sendCodecConfig() {
+    private byte[] withCodecConfig(byte[] keyFrame) {
         byte[] config = codecConfig;
-        QdLinkUsbClient bridge = qdLink;
-        if (bridge != null && config != null && config.length > 0) {
-            bridge.sendVideo(config, WIDTH, HEIGHT, FPS);
-        }
+        if (config == null || config.length == 0) return keyFrame;
+        byte[] combined = new byte[config.length + keyFrame.length];
+        System.arraycopy(config, 0, combined, 0, config.length);
+        System.arraycopy(keyFrame, 0, combined, config.length, keyFrame.length);
+        return combined;
     }
 
     private void requestSyncFrame() {
@@ -273,6 +277,7 @@ public final class SecondScreenService extends Service {
     int carWidth() { return qdLink == null ? 0 : qdLink.carWidth(); }
     int carHeight() { return qdLink == null ? 0 : qdLink.carHeight(); }
     long carFramesSent() { return qdLink == null ? 0 : qdLink.videoFramesSent(); }
+    long carKeyFrames() { return qdLink == null ? 0 : qdLink.keyFramesSent(); }
     long carTouchEvents() { return qdLink == null ? 0 : qdLink.touchEventsReceived(); }
     String usbState() { return qdLink == null ? "" : qdLink.usbState(); }
     String carLog() { return qdLink == null ? "" : qdLink.logText(); }
@@ -313,7 +318,8 @@ public final class SecondScreenService extends Service {
         int id = displayId();
         ActivityManager activities = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
         if (!activities.isActivityStartAllowedOnDisplay(caller, id, waze)) {
-            return "Android blocked normal Waze on display #" + id + "; Android Auto bridge will be used instead.";
+            return "Android blocked normal Waze on display #" + id
+                    + "; Android does not let LeapBox launch Waze there.";
         }
         waze.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         ActivityOptions options = ActivityOptions.makeBasic().setLaunchDisplayId(id);
