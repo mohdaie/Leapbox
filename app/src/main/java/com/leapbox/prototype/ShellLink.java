@@ -19,7 +19,7 @@ final class ShellLink {
     }
 
     static final int PERMISSION_REQUEST = 3107;
-    private static final int SERVICE_VERSION = 2;
+    private static final int SERVICE_VERSION = 3;
 
     private final Shizuku.UserServiceArgs args;
     private final Listener listener;
@@ -164,7 +164,7 @@ final class ShellLink {
     }
 
     String startTouch(String deviceName, String descriptor, int vendor, int product, int deviceId,
-                      int displayId, int width, int height) {
+                      int displayId, int width, int height, int mode) {
         return call(ShellService.START_TOUCH, data -> {
             data.writeString(deviceName);
             data.writeString(descriptor);
@@ -174,6 +174,7 @@ final class ShellLink {
             data.writeInt(displayId);
             data.writeInt(width);
             data.writeInt(height);
+            data.writeInt(mode);
         });
     }
 

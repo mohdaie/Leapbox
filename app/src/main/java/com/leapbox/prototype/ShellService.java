@@ -4,6 +4,8 @@ import android.content.Context;
 import android.content.ContextWrapper;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
+import android.graphics.PixelFormat;
+import android.media.ImageReader;
 import android.os.Binder;
 import android.os.IBinder;
 import android.os.Parcel;
@@ -55,6 +57,9 @@ public final class ShellService extends Binder {
 
     private final Context context;
     private VirtualDisplay display;
+    /** Invisible display the car touchscreen is linked to, so neither phone nor car gets raw touches. */
+    private VirtualDisplay sink;
+    private ImageReader sinkReader;
     private volatile TouchForwarder touch;
 
     public ShellService() { this(null); }
@@ -90,7 +95,8 @@ public final class ShellService extends Binder {
                     break;
                 case START_TOUCH:
                     result = startTouch(data.readString(), data.readString(), data.readInt(),
-                            data.readInt(), data.readInt(), data.readInt(), data.readInt(), data.readInt());
+                            data.readInt(), data.readInt(), data.readInt(), data.readInt(), data.readInt(),
+                            data.readInt());
                     break;
                 case STOP_TOUCH:
                     stopTouch();
@@ -162,18 +168,35 @@ public final class ShellService extends Binder {
                 "--windowingMode", "1", "-f", "0x10000000", "-n", component);
     }
 
+    /**
+     * mode 0: Android links the touchscreen to the car display and scales touches itself.
+     * mode 1: the touchscreen is linked to an invisible sink display; LeapBox reads the raw
+     *         touches, scales them to the car display and injects them.
+     */
     private String startTouch(String deviceName, String descriptor, int vendor, int product, int deviceId,
-                              int displayId, int width, int height) throws Exception {
+                              int displayId, int width, int height, int mode) throws Exception {
         stopTouch();
+        VirtualDisplay target = display;
+        if (mode == 1) {
+            if (sink == null) {
+                sinkReader = ImageReader.newInstance(64, 64, PixelFormat.RGBA_8888, 2);
+                sink = shellDisplayManager().createVirtualDisplay("LeapBox touch sink", 64, 64, 160,
+                        sinkReader.getSurface(), DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+                                | FLAG_SUPPORTS_TOUCH);
+            }
+            target = sink;
+        }
         String uniqueId = null;
-        if (display != null) {
+        int targetId = -1;
+        if (target != null) {
+            targetId = target.getDisplay().getDisplayId();
             try {
                 uniqueId = (String) android.view.Display.class.getMethod("getUniqueId")
-                        .invoke(display.getDisplay());
+                        .invoke(target.getDisplay());
             } catch (ReflectiveOperationException ignored) { }
         }
-        TouchForwarder forwarder = new TouchForwarder(deviceName, descriptor, uniqueId, vendor, product,
-                deviceId, displayId, width, height);
+        TouchForwarder forwarder = new TouchForwarder(deviceName, descriptor, uniqueId, targetId, mode == 1,
+                vendor, product, deviceId, displayId, width, height);
         String result = forwarder.start();
         touch = forwarder;
         return result;
@@ -187,6 +210,14 @@ public final class ShellService extends Binder {
 
     private void releaseAll() {
         stopTouch();
+        if (sink != null) {
+            sink.release();
+            sink = null;
+        }
+        if (sinkReader != null) {
+            sinkReader.close();
+            sinkReader = null;
+        }
         if (display != null) {
             display.release();
             display = null;
@@ -233,7 +264,10 @@ public final class ShellService extends Binder {
         private final String deviceName;
         private final String descriptor;
         private final String displayUniqueId;
+        private final int linkDisplayId;
+        private final boolean injectMode;
         private volatile boolean linked;
+        private volatile boolean forwarding;
         private String linkMethod = "";
         private String location;
         private final StringBuilder samples = new StringBuilder();
@@ -253,11 +287,14 @@ public final class ShellService extends Binder {
         private String path;
         private int minX, maxX = 1, minY, maxY = 1;
 
-        TouchForwarder(String deviceName, String descriptor, String displayUniqueId, int vendor, int product,
-                       int deviceId, int displayId, int width, int height) {
+        TouchForwarder(String deviceName, String descriptor, String displayUniqueId, int linkDisplayId,
+                       boolean injectMode, int vendor, int product, int deviceId, int displayId,
+                       int width, int height) {
             this.deviceName = deviceName;
             this.descriptor = descriptor;
             this.displayUniqueId = displayUniqueId;
+            this.linkDisplayId = linkDisplayId;
+            this.injectMode = injectMode;
             this.vendor = vendor;
             this.product = product;
             this.deviceId = deviceId;
@@ -271,22 +308,28 @@ public final class ShellService extends Binder {
             // does for head-unit touchscreens. Android then scales touches and the phone ignores them.
             boolean found = findDevice();
             String link = linkToDisplay();
-            if (linked) return "touch: linked by Android to car display (" + link + ")";
-
+            String ranges = " raw x " + minX + ".." + maxX + " y " + minY + ".." + maxY;
+            if (found) {
+                if (maxX <= 1) maxX = width - 1;
+                if (maxY <= 1) maxY = height - 1;
+                input = new FileInputStream(path);
+                running = true;
+                thread = new Thread(this::readLoop, "LeapBox-touch");
+                thread.start();
+            }
+            if (!injectMode && linked) {
+                return "touch: ANDROID mode, linked to car display (" + link + ")" + ranges;
+            }
             if (!found) {
-                return String.format(Locale.US, "error: link failed (%s) and no /dev/input device \"%s\" %04x:%04x",
+                return String.format(Locale.US, "error: link %s; no /dev/input device \"%s\" %04x:%04x",
                         link, deviceName, vendor, product);
             }
-            if (maxX <= 1) maxX = width - 1;
-            if (maxY <= 1) maxY = height - 1;
-            input = new FileInputStream(path);
-            running = true;
-            thread = new Thread(this::readLoop, "LeapBox-touch");
-            thread.start();
-            disabled = setDeviceEnabled(false);
-            return "touch: forwarding " + path + " x " + minX + ".." + maxX + " y " + minY + ".." + maxY
-                    + " (link failed: " + link + ")"
-                    + (disabled ? ", phone input disabled" : ", phone input NOT disabled: " + lastError);
+            forwarding = true;
+            if (!linked) disabled = setDeviceEnabled(false);
+            return "touch: LEAPBOX mode, forwarding " + path + ranges
+                    + (linked ? ", raw touches parked on sink display (" + link + ")"
+                              : ", sink link failed (" + link + ")"
+                                + (disabled ? ", phone input disabled" : ", phone input NOT disabled: " + lastError));
         }
 
         /** Associates the input device with the car display; returns a short result text. */
@@ -313,7 +356,7 @@ public final class ShellService extends Binder {
                 }
                 Thread.sleep(400);
                 int associated = associatedDisplay();
-                linked = associated == displayId;
+                linked = associated == linkDisplayId;
                 return "by " + linkMethod + " → device now on display " + associated;
             } catch (ReflectiveOperationException | RuntimeException | InterruptedException error) {
                 return describeError(error);
@@ -382,8 +425,8 @@ public final class ShellService extends Binder {
         }
 
         String status() {
-            if (linked) return "touch: linked to car display by Android";
-            return String.format(Locale.US, "touch: %s x..%d y..%d events=%d injected=%d%s%s%s", path,
+            return String.format(Locale.US, "touch: %s %s x..%d y..%d events=%d injected=%d%s%s%s",
+                    forwarding ? "LEAPBOX" : linked ? "ANDROID" : "OFF", path,
                     maxX, maxY, events, injected, disabled ? " phone-input-off" : "",
                     lastError.isEmpty() ? "" : " last error: " + lastError,
                     samples.length() == 0 ? "" : " first: " + samples);
@@ -493,6 +536,10 @@ public final class ShellService extends Binder {
                         down = value != 0;
                     } else if (type == EV_SYN && code == 0) {
                         long now = SystemClock.uptimeMillis();
+                        if (!forwarding) {
+                            wasDown = down;
+                            continue;
+                        }
                         if (down && !wasDown) {
                             downTime = now;
                             inject(downTime, now, MotionEvent.ACTION_DOWN, x, y);

@@ -132,6 +132,8 @@ public final class MainActivity extends Activity {
                 () -> openOnCar("com.waze", "Waze")), Ui.block(this, 10));
         root.addView(action("Open YouTube on car", Ui.INK,
                 () -> openOnCar("com.google.android.youtube", "YouTube")), Ui.block(this, 10));
+        root.addView(action("Car touch: switch method", Ui.MUTED,
+                () -> { if (screen != null) tell(screen.toggleTouchMode()); refresh(); }), Ui.block(this, 10));
         root.addView(action("Back (in car app)", Ui.MUTED,
                 () -> { if (screen != null) tell(screen.carBack()); }), Ui.block(this, 10));
         root.addView(action("Show LeapBox home on car", Ui.MUTED,
@@ -231,7 +233,8 @@ public final class MainActivity extends Activity {
     }
 
     private String diagnosticText() {
-        String body = status == null ? "" : status.getText().toString();
+        String body = (shizukuStatus == null ? "" : shizukuStatus.getText() + "\n")
+                + (status == null ? "" : status.getText().toString());
         String events = Diag.text();
         return body + "\n\n" + (events.isEmpty() ? "(no USB events yet; press Start first)" : events);
     }

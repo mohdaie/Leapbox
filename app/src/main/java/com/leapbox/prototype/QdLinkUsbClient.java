@@ -44,7 +44,7 @@ final class QdLinkUsbClient {
     /** Hidden system broadcast; its extras say whether the phone is in accessory mode. */
     private static final String ACTION_USB_STATE = "android.hardware.usb.action.USB_STATE";
     private static final long RETRY_MS = 3000;
-    static final String VERSION = "0.4.2";
+    static final String VERSION = "0.4.3";
     private static final int USB_CHUNK = 512;
     private static final int MAX_MESSAGE = 8 * 1024 * 1024;
 

@@ -75,6 +75,27 @@ public final class SecondScreenService extends Service {
     private CarHomeButton homeButton;
     private volatile String touchDeviceName;
     private InputManager.InputDeviceListener inputListener;
+    /** 1 = LeapBox scales car touches itself (default), 0 = Android maps them. */
+    private volatile int touchMode = 1;
+    private volatile String touchStatus = "";
+    private long touchStatusLogged;
+    private final Runnable touchPoll = new Runnable() {
+        @Override public void run() {
+            ShellLink link = shell;
+            if (link != null && shellDisplayId >= 0) {
+                shellCalls.execute(() -> {
+                    String next = link.touchStatus();
+                    long now = SystemClock.uptimeMillis();
+                    if (!next.equals(touchStatus) && now - touchStatusLogged > 4000) {
+                        touchStatusLogged = now;
+                        Diag.log("Car touch status: " + next);
+                    }
+                    touchStatus = next;
+                });
+            }
+            mainHandler.postDelayed(this, 2000);
+        }
+    };
 
     @Override public IBinder onBind(Intent intent) { return binder; }
 
@@ -275,9 +296,9 @@ public final class SecondScreenService extends Service {
             Diag.log("Car touch: no external touchscreen yet; it appears when the car's touch link connects");
             return;
         }
-        String current = link.touchStatus();
-        if (car.getName().equals(touchDeviceName)
-                && (current.startsWith("touch: /") || current.startsWith("touch: linked"))) return;
+        String current = touchStatus;
+        if (car.getName().equals(touchDeviceName) && current.startsWith("touch: ")
+                && !current.startsWith("touch: OFF")) return;
         touchDeviceName = car.getName();
         String name = car.getName();
         int deviceId = car.getId();
@@ -285,8 +306,12 @@ public final class SecondScreenService extends Service {
         int product = car.getProductId();
         String descriptor = car.getDescriptor();
         Diag.log("Car touch device: " + describe(car));
+        int mode = touchMode;
+        mainHandler.removeCallbacks(touchPoll);
+        mainHandler.postDelayed(touchPoll, 2000);
         shellCalls.execute(() -> {
-            String result = link.startTouch(name, descriptor, vendor, product, deviceId, id, WIDTH, HEIGHT);
+            String result = link.startTouch(name, descriptor, vendor, product, deviceId, id, WIDTH, HEIGHT,
+                    mode);
             Diag.log("Car touch → car display: " + result);
             if (result.startsWith("error")) touchDeviceName = null;
         });
@@ -328,9 +353,18 @@ public final class SecondScreenService extends Service {
     String shellState() {
         String state = ShellLink.state(this);
         if (shellDisplayId < 0) return state;
-        ShellLink link = shell;
-        return state + " · app display #" + shellDisplayId
-                + (link == null ? "" : " · " + link.touchStatus());
+        return state + " · app display #" + shellDisplayId + " · " + touchStatus;
+    }
+
+    /** Switches between LeapBox-scaled and Android-mapped car touch; returns the new mode name. */
+    String toggleTouchMode() {
+        touchMode = touchMode == 1 ? 0 : 1;
+        touchDeviceName = null;
+        touchStatus = "";
+        String name = touchMode == 1 ? "LeapBox scaling" : "Android mapping";
+        Diag.log("Car touch method → " + name);
+        startTouchForwarding();
+        return "Car touch: " + name;
     }
 
     private Display currentDisplay() {
