@@ -73,7 +73,8 @@ public final class SecondScreenService extends Service {
     /** Id of the Shizuku-created, app-hosting car display; -1 while LeapBox's own display is used. */
     private volatile int shellDisplayId = -1;
     private CarHomeButton homeButton;
-    private volatile String touchDeviceName;
+    /** Descriptors of car input devices already handed to the Shizuku helper. */
+    private final java.util.Set<String> touchDevices = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
     private InputManager.InputDeviceListener inputListener;
     /** 1 = LeapBox scales car touches itself (default), 0 = Android maps them. */
     private volatile int touchMode = 1;
@@ -239,7 +240,7 @@ public final class SecondScreenService extends Service {
     private void downgradeDisplay() {
         if (shellDisplayId < 0 || encoderSurface == null) return;
         shellDisplayId = -1;
-        touchDeviceName = null;
+        touchDevices.clear();
         dismissCarWindows();
         createOwnDisplay();
         showDashboard();
@@ -260,6 +261,9 @@ public final class SecondScreenService extends Service {
             }
             @Override public void onInputDeviceRemoved(int deviceId) {
                 Diag.log("Input device removed: #" + deviceId);
+                java.util.Set<String> present = new java.util.HashSet<>();
+                for (InputDevice device : findCarTouchDevices()) present.add(device.getDescriptor());
+                touchDevices.retainAll(present);
             }
             @Override public void onInputDeviceChanged(int deviceId) { }
         };
@@ -276,45 +280,52 @@ public final class SecondScreenService extends Service {
                 device.getSources());
     }
 
-    private static InputDevice findCarTouchDevice() {
-        InputDevice mouse = null;
+    /**
+     * Every external pointing device: the C10 registers a touchscreen over USB and, with
+     * Bluetooth on, another one over Bluetooth, and only one of them may carry the touches.
+     */
+    private static java.util.List<InputDevice> findCarTouchDevices() {
+        java.util.List<InputDevice> found = new java.util.ArrayList<>();
         for (int id : InputDevice.getDeviceIds()) {
             InputDevice device = InputDevice.getDevice(id);
             if (device == null || device.isVirtual() || !device.isExternal()) continue;
-            if (device.supportsSource(InputDevice.SOURCE_TOUCHSCREEN)) return device;
-            if (mouse == null && device.supportsSource(InputDevice.SOURCE_MOUSE)) mouse = device;
+            if (device.supportsSource(InputDevice.SOURCE_TOUCHSCREEN)
+                    || device.supportsSource(InputDevice.SOURCE_MOUSE)
+                    || device.supportsSource(InputDevice.SOURCE_STYLUS)
+                    || device.supportsSource(InputDevice.SOURCE_TOUCHPAD)) {
+                found.add(device);
+            }
         }
-        return mouse;
+        return found;
     }
 
     private void startTouchForwarding() {
         ShellLink link = shell;
         int id = shellDisplayId;
         if (link == null || id < 0) return;
-        InputDevice car = findCarTouchDevice();
-        if (car == null) {
-            Diag.log("Car touch: no external touchscreen yet; it appears when the car's touch link connects");
+        java.util.List<InputDevice> cars = findCarTouchDevices();
+        if (cars.isEmpty()) {
+            Diag.log("Car touch: no external touch device yet; it appears when the car's touch link connects");
             return;
         }
-        String current = touchStatus;
-        if (car.getName().equals(touchDeviceName) && current.startsWith("touch: ")
-                && !current.startsWith("touch: OFF")) return;
-        touchDeviceName = car.getName();
-        String name = car.getName();
-        int deviceId = car.getId();
-        int vendor = car.getVendorId();
-        int product = car.getProductId();
-        String descriptor = car.getDescriptor();
-        Diag.log("Car touch device: " + describe(car));
         int mode = touchMode;
         mainHandler.removeCallbacks(touchPoll);
         mainHandler.postDelayed(touchPoll, 2000);
-        shellCalls.execute(() -> {
-            String result = link.startTouch(name, descriptor, vendor, product, deviceId, id, WIDTH, HEIGHT,
-                    mode);
-            Diag.log("Car touch → car display: " + result);
-            if (result.startsWith("error")) touchDeviceName = null;
-        });
+        for (InputDevice car : cars) {
+            String descriptor = car.getDescriptor();
+            if (!touchDevices.add(descriptor)) continue;
+            String name = car.getName();
+            int deviceId = car.getId();
+            int vendor = car.getVendorId();
+            int product = car.getProductId();
+            Diag.log("Car touch device: " + describe(car));
+            shellCalls.execute(() -> {
+                String result = link.startTouch(name, descriptor, vendor, product, deviceId, id, WIDTH, HEIGHT,
+                        mode);
+                Diag.log("Car touch → car display [" + name + " #" + deviceId + "]: " + result);
+                if (result.startsWith("error")) touchDevices.remove(descriptor);
+            });
+        }
     }
 
     /** Opens an installed app on the car display (needs Shizuku). Returns a message for the car. */
@@ -359,7 +370,7 @@ public final class SecondScreenService extends Service {
     /** Switches between LeapBox-scaled and Android-mapped car touch; returns the new mode name. */
     String toggleTouchMode() {
         touchMode = touchMode == 1 ? 0 : 1;
-        touchDeviceName = null;
+        touchDevices.clear();
         touchStatus = "";
         String name = touchMode == 1 ? "LeapBox scaling" : "Android mapping";
         Diag.log("Car touch method → " + name);
@@ -575,7 +586,7 @@ public final class SecondScreenService extends Service {
             ShellLink link = shell;
             shell = null;
             shellDisplayId = -1;
-            touchDeviceName = null;
+            touchDevices.clear();
             link.unbind();
         }
         if (virtualDisplay != null) {

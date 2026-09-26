@@ -60,7 +60,8 @@ public final class ShellService extends Binder {
     /** Invisible display the car touchscreen is linked to, so neither phone nor car gets raw touches. */
     private VirtualDisplay sink;
     private ImageReader sinkReader;
-    private volatile TouchForwarder touch;
+    /** One forwarder per car input device (USB and Bluetooth), keyed by device descriptor. */
+    private final java.util.Map<String, TouchForwarder> touches = new java.util.LinkedHashMap<>();
 
     public ShellService() { this(null); }
 
@@ -107,8 +108,18 @@ public final class ShellService extends Binder {
                             "keyevent", Integer.toString(data.readInt()));
                     break;
                 case STATUS:
-                    TouchForwarder forwarder = touch;
-                    result = forwarder == null ? "touch: off" : forwarder.status();
+                    synchronized (touches) {
+                        if (touches.isEmpty()) {
+                            result = "touch: OFF";
+                        } else {
+                            StringBuilder all = new StringBuilder();
+                            for (TouchForwarder forwarder : touches.values()) {
+                                if (all.length() > 0) all.append(" ; ");
+                                all.append(forwarder.status());
+                            }
+                            result = all.toString();
+                        }
+                    }
                     break;
                 default:
                     return false;
@@ -175,7 +186,10 @@ public final class ShellService extends Binder {
      */
     private String startTouch(String deviceName, String descriptor, int vendor, int product, int deviceId,
                               int displayId, int width, int height, int mode) throws Exception {
-        stopTouch();
+        String key = descriptor == null ? deviceName + deviceId : descriptor;
+        TouchForwarder previous;
+        synchronized (touches) { previous = touches.remove(key); }
+        if (previous != null) previous.stop();
         VirtualDisplay target = display;
         if (mode == 1) {
             if (sink == null) {
@@ -198,14 +212,17 @@ public final class ShellService extends Binder {
         TouchForwarder forwarder = new TouchForwarder(deviceName, descriptor, uniqueId, targetId, mode == 1,
                 vendor, product, deviceId, displayId, width, height);
         String result = forwarder.start();
-        touch = forwarder;
+        synchronized (touches) { touches.put(key, forwarder); }
         return result;
     }
 
     private void stopTouch() {
-        TouchForwarder forwarder = touch;
-        touch = null;
-        if (forwarder != null) forwarder.stop();
+        java.util.List<TouchForwarder> all;
+        synchronized (touches) {
+            all = new java.util.ArrayList<>(touches.values());
+            touches.clear();
+        }
+        for (TouchForwarder forwarder : all) forwarder.stop();
     }
 
     private void releaseAll() {
@@ -438,10 +455,19 @@ public final class ShellService extends Binder {
          */
         private boolean findDevice() throws Exception {
             String dump = exec("getevent", "-il");
-            return findDevice(dump, true) || findDevice(dump, false);
+            // Prefer the device with these ids that reports touch coordinates, then any with these ids,
+            // then any device with this name.
+            return findDevice(dump, true, true) || findDevice(dump, true, false)
+                    || findDevice(dump, false, true) || findDevice(dump, false, false);
         }
 
-        private boolean findDevice(String dump, boolean useIds) {
+        private boolean findDevice(String dump, boolean useIds, boolean needRanges) {
+            path = null;
+            location = null;
+            minX = 0;
+            minY = 0;
+            maxX = 1;
+            maxY = 1;
             String current = null;
             int devVendor = -1, devProduct = -1;
             boolean match = false;
@@ -449,6 +475,8 @@ public final class ShellService extends Binder {
                 String line = raw.trim();
                 if (line.startsWith("ABS (0003):")) line = line.substring("ABS (0003):".length()).trim();
                 if (line.startsWith("add device")) {
+                    if (path != null && needRanges && maxX <= 1) path = null;
+                    if (path != null) break;
                     int slash = line.indexOf('/');
                     current = slash >= 0 ? line.substring(slash) : null;
                     devVendor = -1;
@@ -481,6 +509,7 @@ public final class ShellService extends Binder {
                     }
                 }
             }
+            if (path != null && needRanges && maxX <= 1) path = null;
             return path != null;
         }
 

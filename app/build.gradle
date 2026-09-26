@@ -10,8 +10,8 @@ android {
         applicationId 'com.leapbox.prototype'
         minSdk 29
         targetSdk 35
-        versionCode 11
-        versionName '0.4.3-touch-scale'
+        versionCode 12
+        versionName '0.4.4-all-touch-devices'
     }
 
     compileOptions {
