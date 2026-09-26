@@ -3,6 +3,7 @@ package com.leapbox.prototype;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.provider.Settings;
 import android.view.Surface;
 
@@ -13,11 +14,22 @@ import android.view.Surface;
  */
 final class PhoneTweaks {
     private static final String PREFS = "phone_tweaks";
+    /** Android's "Extra dim" (Samsung: Accessibility → Visibility enhancements → Extra dim). */
+    private static final String EXTRA_DIM = "reduce_bright_colors_activated";
+    private static final String EXTRA_DIM_LEVEL = "reduce_bright_colors_level";
+    static final String GRANT_COMMAND =
+            "adb shell pm grant com.leapbox.prototype android.permission.WRITE_SECURE_SETTINGS";
 
     private PhoneTweaks() {}
 
     static boolean allowed(Context context) {
         return Settings.System.canWrite(context);
+    }
+
+    /** Extra dim lives in secure settings; that needs a one-time adb grant. */
+    static boolean extraDimAllowed(Context context) {
+        return context.checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS)
+                == PackageManager.PERMISSION_GRANTED;
     }
 
     static void apply(Context context, boolean dim) {
@@ -35,12 +47,16 @@ final class PhoneTweaks {
                     .putInt("brightnessMode", get(resolver, Settings.System.SCREEN_BRIGHTNESS_MODE,
                             Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC))
                     .putInt("brightness", get(resolver, Settings.System.SCREEN_BRIGHTNESS, 128))
+                    .putInt("extraDim", Settings.Secure.getInt(resolver, EXTRA_DIM, 0))
+                    .putInt("extraDimLevel", Settings.Secure.getInt(resolver, EXTRA_DIM_LEVEL, 0))
                     .apply();
         }
         put(resolver, Settings.System.ACCELEROMETER_ROTATION, 0);
         put(resolver, Settings.System.USER_ROTATION, Surface.ROTATION_90);
         setDim(context, dim);
-        Diag.log("Phone: landscape locked" + (dim ? ", brightness minimum" : ""));
+        Diag.log("Phone: landscape locked" + (dim ? ", brightness minimum" : "")
+                + (dim && extraDimAllowed(context) ? ", Extra dim on" : "")
+                + (extraDimAllowed(context) ? "" : " (Extra dim needs the one-time grant)"));
     }
 
     static void setDim(Context context, boolean dim) {
@@ -50,10 +66,14 @@ final class PhoneTweaks {
         if (dim) {
             put(resolver, Settings.System.SCREEN_BRIGHTNESS_MODE, Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL);
             put(resolver, Settings.System.SCREEN_BRIGHTNESS, 1);
+            putSecure(context, EXTRA_DIM_LEVEL, 100);
+            putSecure(context, EXTRA_DIM, 1);
         } else {
             put(resolver, Settings.System.SCREEN_BRIGHTNESS_MODE, saved.getInt("brightnessMode",
                     Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC));
             put(resolver, Settings.System.SCREEN_BRIGHTNESS, saved.getInt("brightness", 128));
+            putSecure(context, EXTRA_DIM, saved.getInt("extraDim", 0));
+            putSecure(context, EXTRA_DIM_LEVEL, saved.getInt("extraDimLevel", 0));
         }
     }
 
@@ -67,6 +87,15 @@ final class PhoneTweaks {
         setDim(context, false);
         saved.edit().putBoolean("active", false).apply();
         Diag.log("Phone: rotation and brightness restored");
+    }
+
+    private static void putSecure(Context context, String key, int value) {
+        if (!extraDimAllowed(context)) return;
+        try {
+            Settings.Secure.putInt(context.getContentResolver(), key, value);
+        } catch (RuntimeException error) {
+            Diag.log("Extra dim setting " + key + " failed: " + error);
+        }
     }
 
     private static int get(ContentResolver resolver, String key, int fallback) {

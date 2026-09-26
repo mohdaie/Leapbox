@@ -64,6 +64,8 @@ public final class MainActivity extends Activity {
     private TextView setupStatus;
     private TextView writeState;
     private TextView overlayState;
+    private TextView extraDimState;
+    private TextView extraDimHint;
     private TextView logView;
     private TextView greeting;
     private TextView homeStatus;
@@ -199,6 +201,12 @@ public final class MainActivity extends Activity {
         overlayState = Ui.text(this, "", 15, Ui.INK, false);
         permissions.addView(permissionRow(overlayState, () -> openSettings(
                 new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, packageUri()))), Ui.block(this, 10));
+        extraDimState = Ui.text(this, "", 15, Ui.INK, false);
+        permissions.addView(permissionRow(extraDimState, this::copyGrantCommand), Ui.block(this, 10));
+        extraDimHint = Ui.text(this,
+                "Optional, once: connect the phone to a computer with USB debugging on, run the copied "
+                        + "command, then unplug. The permission stays after that.", 13, Ui.MUTED, false);
+        permissions.addView(extraDimHint, Ui.block(this, 6));
         column.addView(permissions, Ui.block(this, 26));
 
         LinearLayout drive = card();
@@ -575,6 +583,9 @@ public final class MainActivity extends Activity {
         }
         setPermission(writeState, PhoneTweaks.allowed(this), "Landscape + dimming");
         setPermission(overlayState, Settings.canDrawOverlays(this), "LeapBox home button");
+        boolean extraDim = PhoneTweaks.extraDimAllowed(this);
+        setPermission(extraDimState, extraDim, "Automatic Extra dim (optional)");
+        extraDimHint.setVisibility(extraDim ? View.GONE : View.VISIBLE);
         setupStatus.setText(usbSummary());
         String events = Diag.text();
         logView.setText(events.isEmpty() ? "No events yet." : events);
@@ -592,6 +603,13 @@ public final class MainActivity extends Activity {
         android.hardware.usb.UsbAccessory[] accessories = usb == null ? null : usb.getAccessoryList();
         if (accessories == null || accessories.length == 0) return "Car: not connected";
         return "Car: " + accessories[0].getModel() + " connected";
+    }
+
+    private void copyGrantCommand() {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (clipboard == null) return;
+        clipboard.setPrimaryClip(ClipData.newPlainText("LeapBox grant", PhoneTweaks.GRANT_COMMAND));
+        tell("Command copied: " + PhoneTweaks.GRANT_COMMAND);
     }
 
     private void copyLog() {
