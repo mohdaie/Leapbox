@@ -48,7 +48,7 @@ final class QdLinkUsbClient {
     private static final String ACTION_USB_STATE = "android.hardware.usb.action.USB_STATE";
     private static final long RETRY_MS = 3000;
     private static final int LOG_LINES = 80;
-    static final String VERSION = "0.3.2";
+    static final String VERSION = "0.3.3";
     private static final int USB_CHUNK = 512;
     private static final int MAX_MESSAGE = 8 * 1024 * 1024;
 
@@ -63,6 +63,7 @@ final class QdLinkUsbClient {
     private final AtomicLong videoFrames = new AtomicLong();
     private final AtomicLong touchEvents = new AtomicLong();
     private final AtomicLong keyFrames = new AtomicLong();
+    private final AtomicLong oddPackets = new AtomicLong();
 
     private ParcelFileDescriptor descriptor;
     private FileInputStream input;
@@ -305,22 +306,31 @@ final class QdLinkUsbClient {
     }
 
     private void handleV2(byte[] packet) throws IOException {
-        if (packet.length < 16 || !startsWith(packet, "5A5A")) return;
+        if (packet.length < 16 || !startsWith(packet, "5A5A")) {
+            logOdd("non-5A5A " + packet.length + " B", packet);
+            return;
+        }
         int declared = int32(packet, 4);
-        if (declared < 16 || declared > packet.length) return;
+        if (declared < 16 || declared > packet.length) {
+            logOdd("5A5A bad length " + declared, packet);
+            return;
+        }
         int messageType = packet[10] & 0xff;
         int source = packet[11] & 0xff;
         int payloadFormat = packet[13] & 0xff;
         if (source != 1) {
-            log("car → 5A5A type=" + messageType + " source=" + source + " (ignored)");
+            logOdd("5A5A type=" + messageType + " source=" + source + " len=" + declared, packet);
             return;
         }
 
         if (messageType == 2) {
-            parseTouch(packet, declared);
+            if (!parseTouch(packet, declared)) logOdd("unparsed touch len=" + declared, packet);
             return;
         }
-        if (payloadFormat != 1) return;
+        if (payloadFormat != 1) {
+            logOdd("5A5A type=" + messageType + " format=" + payloadFormat + " len=" + declared, packet);
+            return;
+        }
         String jsonText = new String(packet, 16, declared - 16, StandardCharsets.UTF_8);
         JSONObject root;
         try { root = new JSONObject(jsonText); }
@@ -420,8 +430,13 @@ final class QdLinkUsbClient {
                 "MirrorHeightInApp", carHeight);
     }
 
-    private void parseTouch(byte[] packet, int declared) {
-        if (declared < 31) return;
+    /** Logs an unrecognised car packet (capped) so touch and other formats can be decoded later. */
+    private void logOdd(String what, byte[] packet) {
+        if (oddPackets.incrementAndGet() <= 30) log("car → " + what + ": " + hexPrefix(packet, 40));
+    }
+
+    private boolean parseTouch(byte[] packet, int declared) {
+        if (declared < 31) return false;
         int body = 16;
         int actionId = int32(packet, body);
         int fingerAction = packet.length > body + 6 ? packet[body + 6] & 0xff : -1;
@@ -432,13 +447,14 @@ final class QdLinkUsbClient {
         else if (actionId == 0) action = 0;
         else if (actionId == 1) action = 1;
         else if (actionId == 2) action = 2;
-        else return;
+        else return false;
         float x = float32(packet, body + 7);
         float y = float32(packet, body + 11);
         if (touchEvents.incrementAndGet() <= 3) {
             log(String.format(Locale.US, "car → touch action=%d x=%.1f y=%.1f", action, x, y));
         }
         if (listener != null) listener.onCarTouch(x, y, action, carWidth, carHeight);
+        return true;
     }
 
     private void startHeartbeat() {
