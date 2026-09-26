@@ -20,9 +20,6 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
-import java.text.SimpleDateFormat;
-import java.util.ArrayDeque;
-import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -47,8 +44,7 @@ final class QdLinkUsbClient {
     /** Hidden system broadcast; its extras say whether the phone is in accessory mode. */
     private static final String ACTION_USB_STATE = "android.hardware.usb.action.USB_STATE";
     private static final long RETRY_MS = 3000;
-    private static final int LOG_LINES = 80;
-    static final String VERSION = "0.3.4";
+    static final String VERSION = "0.4.0";
     private static final int USB_CHUNK = 512;
     private static final int MAX_MESSAGE = 8 * 1024 * 1024;
 
@@ -57,8 +53,6 @@ final class QdLinkUsbClient {
     private final Listener listener;
     private final Object writeLock = new Object();
     private final Object sessionLock = new Object();
-    private final ArrayDeque<String> log = new ArrayDeque<>();
-    private final SimpleDateFormat clock = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US);
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicLong videoFrames = new AtomicLong();
     private final AtomicLong touchEvents = new AtomicLong();
@@ -149,9 +143,7 @@ final class QdLinkUsbClient {
     String status() { return status; }
     String usbState() { return usbState; }
 
-    String logText() {
-        synchronized (log) { return String.join("\n", log); }
-    }
+    String logText() { return Diag.text(); }
 
     boolean sendVideo(byte[] h264, int width, int height, int frameRate, boolean keyFrame) {
         if (!connected || !playing || output == null || h264 == null || h264.length == 0) {
@@ -714,14 +706,7 @@ final class QdLinkUsbClient {
         notifyStatus();
     }
 
-    private void log(String line) {
-        String stamped;
-        synchronized (clock) { stamped = clock.format(new Date()) + "  " + line; }
-        synchronized (log) {
-            log.addLast(stamped);
-            while (log.size() > LOG_LINES) log.removeFirst();
-        }
-    }
+    private void log(String line) { Diag.log(line); }
 
     private void notifyStatus() {
         if (listener != null) listener.onStatusChanged();

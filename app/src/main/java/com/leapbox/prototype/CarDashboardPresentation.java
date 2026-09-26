@@ -2,6 +2,7 @@ package com.leapbox.prototype;
 
 import android.app.Presentation;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -16,7 +17,16 @@ import android.widget.TextView;
 
 /** The car-only LeapBox desktop. It is not the phone's visible screen. */
 final class CarDashboardPresentation extends Presentation {
+    /** Apps offered on the car, if installed: package, label, symbol. */
+    static final String[][] APPS = {
+            {"com.waze", "Waze", "↗"},
+            {"com.google.android.apps.maps", "Maps", "⌖"},
+            {"com.google.android.youtube", "YouTube", "▶"},
+            {"com.spotify.music", "Spotify", "♫"},
+    };
+
     private final SecondScreenService service;
+    private TextView result;
 
     CarDashboardPresentation(Context context, Display display, SecondScreenService service) {
         super(context, display);
@@ -50,33 +60,49 @@ final class CarDashboardPresentation extends Presentation {
         TextView title = Ui.text(context, "Your car screen. Your phone stays yours.", 35, Color.WHITE, true);
         root.addView(title, Ui.block(context, 28));
         TextView subtitle = Ui.text(context,
-                "LeapBox runs this dashboard independently from the phone display.", 18,
+                service.hasShell()
+                        ? "Tap an app to open it here. Tap LEAPBOX at the bottom left to come back."
+                        : "Connect Shizuku in the LeapBox phone app to open apps here.", 18,
                 Color.rgb(178, 197, 222), false);
         root.addView(subtitle, Ui.block(context, 8));
 
-        LinearLayout card = Ui.column(context);
-        card.setPadding(Ui.dp(context, 34), Ui.dp(context, 30),
-                Ui.dp(context, 34), Ui.dp(context, 30));
-        card.setBackground(Ui.rounded(Color.rgb(32, 47, 68), context, 28));
-        TextView symbol = Ui.text(context, "↗", 58, Color.rgb(83, 215, 197), true);
-        card.addView(symbol);
-        TextView label = Ui.text(context, "Waze", 34, Color.WHITE, true);
-        card.addView(label);
-        TextView description = Ui.text(context, "Tap to verify C10 → LeapBox touch", 16,
-                Color.rgb(179, 198, 218), false);
-        card.addView(description, Ui.block(context, 5));
-        TextView result = Ui.text(context, "", 14, Color.rgb(255, 204, 123), false);
-        card.addView(result, Ui.block(context, 12));
-        card.setClickable(true);
-        card.setFocusable(true);
-        card.setOnClickListener(view -> result.setText(service.dashboardWazeSelected()));
-        root.addView(card, Ui.block(context, 30));
+        LinearLayout tiles = new LinearLayout(context);
+        PackageManager packages = context.getPackageManager();
+        int shown = 0;
+        for (String[] app : APPS) {
+            if (packages.getLaunchIntentForPackage(app[0]) == null) continue;
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
+            if (shown > 0) params.leftMargin = Ui.dp(context, 18);
+            tiles.addView(tile(context, app[0], app[1], app[2]), params);
+            shown++;
+        }
+        if (shown == 0) {
+            tiles.addView(Ui.text(context, "Install Waze, Maps, YouTube or Spotify on the phone.",
+                    18, Color.WHITE, false));
+        }
+        root.addView(tiles, Ui.block(context, 26));
+
+        result = Ui.text(context, "", 16, Color.rgb(255, 204, 123), false);
+        root.addView(result, Ui.block(context, 16));
 
         TextView footer = Ui.text(context,
-                "LEAPBOX 0.3  ·  INDEPENDENT DISPLAY  ·  QDLINK USB", 13,
+                "LEAPBOX 0.4  ·  INDEPENDENT DISPLAY  ·  QDLINK USB", 13,
                 Color.rgb(158, 174, 194), true);
-        root.addView(footer, Ui.block(context, 26));
+        root.addView(footer, Ui.block(context, 18));
         setContentView(root);
+    }
+
+    private View tile(Context context, String packageName, String label, String symbol) {
+        LinearLayout card = Ui.column(context);
+        card.setPadding(Ui.dp(context, 26), Ui.dp(context, 22),
+                Ui.dp(context, 26), Ui.dp(context, 22));
+        card.setBackground(Ui.rounded(Color.rgb(32, 47, 68), context, 24));
+        card.addView(Ui.text(context, symbol, 44, Color.rgb(83, 215, 197), true));
+        card.addView(Ui.text(context, label, 28, Color.WHITE, true), Ui.block(context, 4));
+        card.setClickable(true);
+        card.setFocusable(true);
+        card.setOnClickListener(view -> result.setText(service.openOnCar(packageName, label)));
+        return card;
     }
 
     /**

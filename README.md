@@ -1,4 +1,4 @@
-# LeapBox Prototype 03
+# LeapBox Prototype 04
 
 An Android phone prototype for a Leapmotor C10. LeapBox tries to replace the QDLink *phone* app: it talks to the car's built-in QDLink receiver over USB (Android Open Accessory) and sends the car its **own** 1920 × 882 dashboard instead of a mirror of the phone screen. The phone stays free for other apps and may lock.
 
@@ -27,6 +27,16 @@ What the log tells you:
 | `Android refused to open …` | Another app (usually the QDLink phone app) owns the accessory. |
 | `waiting for car reply` with no reply | The probe LeapBox sends is not what the car expects. |
 | `car → …` JSON lines | Handshake progress; compare against what the car expects. |
+
+## Apps on the car (Shizuku)
+
+Android does not let a normal app open other apps (Waze, YouTube, Maps, Spotify) on a screen it created, and the C10 sends touch as a touchscreen that Android routes to the phone's own screen. With [Shizuku](https://github.com/RikkaApps/Shizuku), LeapBox runs a small helper (`ShellService`) as the shell user, the same way scrcpy's `--new-display` works:
+
+- it creates a trusted, always-unlocked car display that other apps may open on;
+- it opens the chosen app there (`am start --display`);
+- it reads the car's touchscreen from `/dev/input`, disables it for the phone, and injects the touches into the car display.
+
+Setup: install Shizuku, pair it with Wireless debugging once, and tap **Start** (again after each phone restart). In LeapBox tap **Connect Shizuku** and allow, then **Start LeapBox car desktop**. The car dashboard shows tiles for installed apps; a small **LEAPBOX** button on the car returns to the dashboard. Without Shizuku, LeapBox falls back to its own display (dashboard only).
 
 ## Build
 

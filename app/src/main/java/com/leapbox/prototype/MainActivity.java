@@ -22,11 +22,22 @@ import android.widget.Toast;
 
 import java.util.Locale;
 
+import rikka.shizuku.Shizuku;
+
 public final class MainActivity extends Activity {
     private SecondScreenService screen;
     private boolean bound;
     private TextView status;
     private TextView logView;
+    private TextView shizukuStatus;
+    private final Shizuku.OnRequestPermissionResultListener shizukuPermission = (code, result) -> {
+        if (code != ShellLink.PERMISSION_REQUEST) return;
+        boolean granted = result == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        Diag.log("Shizuku permission " + (granted ? "granted" : "denied"));
+        tell(granted ? "Shizuku connected" : "Shizuku permission denied");
+        if (granted && screen != null) screen.connectShell();
+        refresh();
+    };
     private String accessoryStatus = "USB accessory: not checked";
     private final Handler handler = new Handler(Looper.getMainLooper());
 
@@ -51,9 +62,15 @@ public final class MainActivity extends Activity {
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         buildInterface();
+        Shizuku.addRequestPermissionResultListener(shizukuPermission);
         if (UsbManager.ACTION_USB_ACCESSORY_ATTACHED.equals(getIntent().getAction())) {
             startLeapBox(SecondScreenService.ACTION_ACCESSORY);
         }
+    }
+
+    @Override protected void onDestroy() {
+        Shizuku.removeRequestPermissionResultListener(shizukuPermission);
+        super.onDestroy();
     }
 
     @Override protected void onNewIntent(Intent intent) {
@@ -90,7 +107,7 @@ public final class MainActivity extends Activity {
                 Ui.dp(this, 23), Ui.dp(this, 34));
         scroll.addView(root);
 
-        root.addView(Ui.text(this, "LEAPBOX  /  PROTOTYPE 03", 13, Ui.BLUE, true));
+        root.addView(Ui.text(this, "LEAPBOX  /  PROTOTYPE 04", 13, Ui.BLUE, true));
         root.addView(Ui.text(this, "One phone. Two independent screens.", 29, Ui.INK, true),
                 Ui.block(this, 10));
         root.addView(Ui.text(this,
@@ -106,11 +123,18 @@ public final class MainActivity extends Activity {
         root.addView(action("Inspect connected car USB", Ui.MUTED,
                 this::inspectUsb), Ui.block(this, 10));
 
-        addSection(root, "02  INDEPENDENT SCREEN TEST",
-                "The C10 should show the LeapBox desktop with one Waze icon. While it stays there, use ChatGPT, WhatsApp, Camera or anything else on the phone.");
-        root.addView(action("↗  Diagnostic: try normal Waze on car display", Ui.INK,
-                this::launchWazeOnSecond), Ui.block(this, 17));
-        root.addView(action("Return car to LeapBox desktop", Ui.MUTED,
+        addSection(root, "02  APPS ON THE CAR (SHIZUKU)",
+                "Android only lets LeapBox open Waze or YouTube on the car screen, and move the car's touch off your phone, with Shizuku. Start Shizuku, then tap Connect Shizuku once and allow. Start LeapBox after that.");
+        shizukuStatus = Ui.text(this, "", 15, Ui.INK, true);
+        root.addView(shizukuStatus, Ui.block(this, 12));
+        root.addView(action("Connect Shizuku", Ui.BLUE, this::connectShizuku), Ui.block(this, 12));
+        root.addView(action("Open Waze on car", Ui.INK,
+                () -> openOnCar("com.waze", "Waze")), Ui.block(this, 10));
+        root.addView(action("Open YouTube on car", Ui.INK,
+                () -> openOnCar("com.google.android.youtube", "YouTube")), Ui.block(this, 10));
+        root.addView(action("Back (in car app)", Ui.MUTED,
+                () -> { if (screen != null) tell(screen.carBack()); }), Ui.block(this, 10));
+        root.addView(action("Show LeapBox home on car", Ui.MUTED,
                 () -> { if (screen != null) screen.showDashboard(); refresh(); }),
                 Ui.block(this, 10));
 
@@ -171,12 +195,30 @@ public final class MainActivity extends Activity {
         refresh();
     }
 
-    private void launchWazeOnSecond() {
-        if (screen == null) {
+    private void connectShizuku() {
+        if (!ShellLink.running()) {
+            tell(ShellLink.state(this));
+            try {
+                Intent open = getPackageManager().getLaunchIntentForPackage("moe.shizuku.privileged.api");
+                if (open != null) startActivity(open);
+            } catch (RuntimeException ignored) { }
+            return;
+        }
+        if (ShellLink.permitted()) {
+            if (screen != null) screen.connectShell();
+            tell("Shizuku ready");
+        } else {
+            ShellLink.requestPermission();
+        }
+        refresh();
+    }
+
+    private void openOnCar(String packageName, String label) {
+        if (screen == null || !screen.isReady()) {
             tell("Start LeapBox first.");
             return;
         }
-        tell(screen.launchWaze(this));
+        tell(screen.openOnCar(packageName, label));
         refresh();
     }
 
@@ -190,7 +232,7 @@ public final class MainActivity extends Activity {
 
     private String diagnosticText() {
         String body = status == null ? "" : status.getText().toString();
-        String events = screen == null ? "" : screen.carLog();
+        String events = Diag.text();
         return body + "\n\n" + (events.isEmpty() ? "(no USB events yet; press Start first)" : events);
     }
 
@@ -212,8 +254,12 @@ public final class MainActivity extends Activity {
 
     private void refresh() {
         if (status == null) return;
+        if (shizukuStatus != null) {
+            shizukuStatus.setText(screen != null && screen.isReady()
+                    ? screen.shellState() : ShellLink.state(this));
+        }
         if (logView != null) {
-            String events = screen == null ? "" : screen.carLog();
+            String events = Diag.text();
             logView.setText(events.isEmpty() ? "No USB events yet." : events);
         }
         if (screen == null || !screen.isReady()) {

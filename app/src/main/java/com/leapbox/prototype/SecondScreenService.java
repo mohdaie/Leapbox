@@ -1,18 +1,17 @@
 package com.leapbox.prototype;
 
-import android.app.ActivityManager;
-import android.app.ActivityOptions;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
+import android.hardware.input.InputManager;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
@@ -24,10 +23,15 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
+import android.view.Display;
+import android.view.InputDevice;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.Surface;
 
 import java.nio.ByteBuffer;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -64,6 +68,13 @@ public final class SecondScreenService extends Service {
     private QdLinkUsbClient qdLink;
     private volatile byte[] codecConfig;
     private volatile long lastTouchDownTime;
+    private final ExecutorService shellCalls = Executors.newSingleThreadExecutor();
+    private ShellLink shell;
+    /** Id of the Shizuku-created, app-hosting car display; -1 while LeapBox's own display is used. */
+    private volatile int shellDisplayId = -1;
+    private CarHomeButton homeButton;
+    private volatile String touchDeviceName;
+    private InputManager.InputDeviceListener inputListener;
 
     @Override public IBinder onBind(Intent intent) { return binder; }
 
@@ -77,6 +88,7 @@ public final class SecondScreenService extends Service {
             try {
                 createScreen();
                 startCarBridge();
+                startShell();
             } catch (Exception | LinkageError error) {
                 status = "Display failed: " + error.getClass().getSimpleName() + ": " + error.getMessage();
                 releaseScreen();
@@ -84,6 +96,7 @@ public final class SecondScreenService extends Service {
             }
         } else if (qdLink == null) {
             startCarBridge();
+            startShell();
         } else if (intent != null && ACTION_ACCESSORY.equals(intent.getAction())) {
             qdLink.accessoryAttached();
         }
@@ -134,20 +147,212 @@ public final class SecondScreenService extends Service {
         encoderSurface = encoder.createInputSurface();
         encoder.start();
 
-        DisplayManager displayManager = (DisplayManager) getSystemService(DISPLAY_SERVICE);
-        int density = CAR_DENSITY;
-        int displayFlags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
-                | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
-                | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY;
-        virtualDisplay = displayManager.createVirtualDisplay("LeapBox car desktop", WIDTH, HEIGHT,
-                density, encoderSurface, displayFlags);
-        if (virtualDisplay == null) throw new IllegalStateException("Virtual display unavailable");
-
+        createOwnDisplay();
         showDashboard();
         encoding = true;
         drainThread = new Thread(this::drainFrames, "LeapBox-H264-output");
         drainThread.start();
-        status = "LeapBox desktop ready on display #" + virtualDisplay.getDisplay().getDisplayId();
+        status = "LeapBox desktop ready on display #" + displayId();
+    }
+
+    /** LeapBox's own display: shows the dashboard, but Android lets no other app open on it. */
+    private void createOwnDisplay() {
+        DisplayManager displayManager = (DisplayManager) getSystemService(DISPLAY_SERVICE);
+        int displayFlags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
+                | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
+                | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY;
+        virtualDisplay = displayManager.createVirtualDisplay("LeapBox car desktop", WIDTH, HEIGHT,
+                CAR_DENSITY, encoderSurface, displayFlags);
+        if (virtualDisplay == null) throw new IllegalStateException("Virtual display unavailable");
+    }
+
+    // ---- Shizuku: app-hosting car display, app launching and car touch redirection ----
+
+    private void startShell() {
+        if (shell == null) {
+            shell = new ShellLink(this, new ShellLink.Listener() {
+                @Override public void onShellConnected() { mainHandler.post(() -> upgradeDisplay()); }
+                @Override public void onShellDisconnected() { mainHandler.post(() -> downgradeDisplay()); }
+            });
+        }
+        Diag.log(ShellLink.state(this));
+        shell.bind();
+        watchInputDevices();
+    }
+
+    /** Called when the user grants Shizuku permission while LeapBox is running. */
+    void connectShell() {
+        if (encoderSurface == null) return;
+        startShell();
+    }
+
+    boolean hasShell() { return shellDisplayId >= 0; }
+
+    /** Moves the car picture onto a Shizuku-created display that other apps may open on. */
+    private void upgradeDisplay() {
+        ShellLink link = shell;
+        if (link == null || encoderSurface == null || shellDisplayId >= 0) return;
+        dismissCarWindows();
+        if (virtualDisplay != null) {
+            virtualDisplay.release();
+            virtualDisplay = null;
+        }
+        shellCalls.execute(() -> {
+            int id = link.createDisplay(encoderSurface, WIDTH, HEIGHT, CAR_DENSITY);
+            mainHandler.post(() -> {
+                if (encoderSurface == null) return;
+                if (id < 0) {
+                    Diag.log("Shizuku: falling back to LeapBox's own display");
+                    createOwnDisplay();
+                } else {
+                    shellDisplayId = id;
+                    status = "Shizuku car display #" + id + " ready for apps";
+                }
+                showDashboard();
+                requestSyncFrame();
+                if (id >= 0) startTouchForwarding();
+            });
+        });
+    }
+
+    private void downgradeDisplay() {
+        if (shellDisplayId < 0 || encoderSurface == null) return;
+        shellDisplayId = -1;
+        touchDeviceName = null;
+        dismissCarWindows();
+        createOwnDisplay();
+        showDashboard();
+        requestSyncFrame();
+    }
+
+    /** Car touches arrive as an external touchscreen on the phone (Bluetooth or USB HID). */
+    private void watchInputDevices() {
+        if (inputListener != null) return;
+        InputManager input = (InputManager) getSystemService(INPUT_SERVICE);
+        inputListener = new InputManager.InputDeviceListener() {
+            @Override public void onInputDeviceAdded(int deviceId) {
+                InputDevice device = InputDevice.getDevice(deviceId);
+                if (device != null && device.isExternal()) {
+                    Diag.log("Input device added: " + describe(device));
+                    startTouchForwarding();
+                }
+            }
+            @Override public void onInputDeviceRemoved(int deviceId) {
+                Diag.log("Input device removed: #" + deviceId);
+            }
+            @Override public void onInputDeviceChanged(int deviceId) { }
+        };
+        input.registerInputDeviceListener(inputListener, mainHandler);
+        for (int id : InputDevice.getDeviceIds()) {
+            InputDevice device = InputDevice.getDevice(id);
+            if (device != null && device.isExternal()) Diag.log("External input device: " + describe(device));
+        }
+    }
+
+    private static String describe(InputDevice device) {
+        return "\"" + device.getName() + "\" #" + device.getId() + " sources=0x"
+                + Integer.toHexString(device.getSources());
+    }
+
+    private static InputDevice findCarTouchDevice() {
+        InputDevice mouse = null;
+        for (int id : InputDevice.getDeviceIds()) {
+            InputDevice device = InputDevice.getDevice(id);
+            if (device == null || device.isVirtual() || !device.isExternal()) continue;
+            if (device.supportsSource(InputDevice.SOURCE_TOUCHSCREEN)) return device;
+            if (mouse == null && device.supportsSource(InputDevice.SOURCE_MOUSE)) mouse = device;
+        }
+        return mouse;
+    }
+
+    private void startTouchForwarding() {
+        ShellLink link = shell;
+        int id = shellDisplayId;
+        if (link == null || id < 0) return;
+        InputDevice car = findCarTouchDevice();
+        if (car == null) {
+            Diag.log("Car touch: no external touchscreen yet; it appears when the car's touch link connects");
+            return;
+        }
+        if (car.getName().equals(touchDeviceName)) return;
+        touchDeviceName = car.getName();
+        String name = car.getName();
+        int deviceId = car.getId();
+        shellCalls.execute(() -> {
+            String result = link.startTouch(name, deviceId, id, WIDTH, HEIGHT);
+            Diag.log("Car touch → car display: " + result);
+            if (result.startsWith("error")) touchDeviceName = null;
+        });
+    }
+
+    /** Opens an installed app on the car display (needs Shizuku). Returns a message for the car. */
+    String openOnCar(String packageName, String label) {
+        ShellLink link = shell;
+        int id = shellDisplayId;
+        if (link == null || id < 0) {
+            String state = ShellLink.state(this);
+            Diag.log("Open " + label + " on car: not possible; " + state);
+            return label + " needs Shizuku · " + state;
+        }
+        Intent launch = getPackageManager().getLaunchIntentForPackage(packageName);
+        ComponentName component = launch == null ? null : launch.getComponent();
+        if (component == null) return label + " is not installed on the phone";
+        CarDashboardPresentation previous = dashboard;
+        dashboard = null;
+        if (previous != null) previous.dismiss();
+        showHomeButton();
+        status = label + " on the car display";
+        shellCalls.execute(() -> Diag.log("Open " + label + " on car #" + id + ": "
+                + link.launch(id, component.flattenToShortString())));
+        return "Opening " + label + "…";
+    }
+
+    /** Sends BACK to the app on the car display. */
+    String carBack() {
+        ShellLink link = shell;
+        int id = shellDisplayId;
+        if (link == null || id < 0) return "Needs Shizuku";
+        shellCalls.execute(() -> Diag.log("Car BACK: " + link.key(id, KeyEvent.KEYCODE_BACK)));
+        return "Back sent to the car app";
+    }
+
+    String shellState() {
+        String state = ShellLink.state(this);
+        if (shellDisplayId < 0) return state;
+        ShellLink link = shell;
+        return state + " · app display #" + shellDisplayId
+                + (link == null ? "" : " · " + link.touchStatus());
+    }
+
+    private Display currentDisplay() {
+        if (shellDisplayId >= 0) {
+            DisplayManager displays = (DisplayManager) getSystemService(DISPLAY_SERVICE);
+            return displays.getDisplay(shellDisplayId);
+        }
+        return virtualDisplay == null ? null : virtualDisplay.getDisplay();
+    }
+
+    private void showHomeButton() {
+        Display display = currentDisplay();
+        if (display == null || homeButton != null) return;
+        homeButton = new CarHomeButton(this, display, this::showDashboard);
+        try {
+            homeButton.show();
+        } catch (RuntimeException error) {
+            Diag.log("Car home button failed: " + error);
+            homeButton = null;
+        }
+    }
+
+    private void dismissCarWindows() {
+        if (dashboard != null) {
+            dashboard.dismiss();
+            dashboard = null;
+        }
+        if (homeButton != null) {
+            homeButton.dismiss();
+            homeButton = null;
+        }
     }
 
     private void startCarBridge() {
@@ -255,7 +460,7 @@ public final class SecondScreenService extends Service {
     private void dispatchCarTouch(float carX, float carY, int action,
                                   int sourceWidth, int sourceHeight) {
         CarDashboardPresentation presentation = dashboard;
-        if (presentation == null || virtualDisplay == null) return;
+        if (presentation == null) return;
         float x = carX * WIDTH / Math.max(1f, sourceWidth);
         float y = carY * HEIGHT / Math.max(1f, sourceHeight);
         long now = SystemClock.uptimeMillis();
@@ -266,8 +471,11 @@ public final class SecondScreenService extends Service {
         if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) lastTouchDownTime = 0;
     }
 
-    boolean isReady() { return virtualDisplay != null; }
-    int displayId() { return virtualDisplay == null ? -1 : virtualDisplay.getDisplay().getDisplayId(); }
+    boolean isReady() { return virtualDisplay != null || shellDisplayId >= 0; }
+    int displayId() {
+        if (shellDisplayId >= 0) return shellDisplayId;
+        return virtualDisplay == null ? -1 : virtualDisplay.getDisplay().getDisplayId();
+    }
     boolean isAwake() { return backgroundWakeLock != null && backgroundWakeLock.isHeld(); }
     long framesEncoded() { return frames.get(); }
     long bytesEncoded() { return bytes.get(); }
@@ -282,7 +490,7 @@ public final class SecondScreenService extends Service {
     long carKeyFrames() { return qdLink == null ? 0 : qdLink.keyFramesSent(); }
     long carTouchEvents() { return qdLink == null ? 0 : qdLink.touchEventsReceived(); }
     String usbState() { return qdLink == null ? "" : qdLink.usbState(); }
-    String carLog() { return qdLink == null ? "" : qdLink.logText(); }
+    String carLog() { return Diag.text(); }
 
     void reconnectCar() {
         if (qdLink == null) startCarBridge();
@@ -296,47 +504,17 @@ public final class SecondScreenService extends Service {
         stopSelf();
     }
 
+    /** Shows the LeapBox desktop on the car (covering any app opened there). */
     void showDashboard() {
-        if (virtualDisplay == null || dashboard != null) return;
-        dashboard = new CarDashboardPresentation(this, virtualDisplay.getDisplay(), this);
+        Display display = currentDisplay();
+        if (display == null || dashboard != null) return;
+        if (homeButton != null) {
+            homeButton.dismiss();
+            homeButton = null;
+        }
+        dashboard = new CarDashboardPresentation(this, display, this);
         dashboard.show();
         status = "LeapBox desktop on display #" + displayId();
-    }
-
-    String dashboardWazeSelected() {
-        status = "Waze selected on LeapBox desktop; independent C10 touch path works";
-        return "Touch received from the C10 · car → LeapBox works";
-    }
-
-    /** Diagnostic only: Android may reject a normal third-party app on this virtual display. */
-    String launchWaze(Context caller) {
-        if (virtualDisplay == null) return "Start LeapBox first.";
-        if (!getPackageManager().hasSystemFeature(
-                PackageManager.FEATURE_ACTIVITIES_ON_SECONDARY_DISPLAYS)) {
-            return "This phone does not advertise activities on secondary displays.";
-        }
-        Intent waze = getPackageManager().getLaunchIntentForPackage("com.waze");
-        if (waze == null) return "Install Waze on your phone first.";
-        int id = displayId();
-        ActivityManager activities = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
-        if (!activities.isActivityStartAllowedOnDisplay(caller, id, waze)) {
-            return "Android blocked normal Waze on display #" + id
-                    + "; Android does not let LeapBox launch Waze there.";
-        }
-        waze.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        ActivityOptions options = ActivityOptions.makeBasic().setLaunchDisplayId(id);
-        CarDashboardPresentation previous = dashboard;
-        dashboard = null;
-        if (previous != null) previous.dismiss();
-        try {
-            caller.startActivity(waze, options.toBundle());
-            status = "Requested Waze on display #" + id + "; verify on device";
-            return status;
-        } catch (RuntimeException error) {
-            showDashboard();
-            status = "Waze launch failed: " + error.getClass().getSimpleName();
-            return status;
-        }
     }
 
     private void releaseScreen() {
@@ -345,9 +523,17 @@ public final class SecondScreenService extends Service {
             qdLink.stop();
             qdLink = null;
         }
-        if (dashboard != null) {
-            dashboard.dismiss();
-            dashboard = null;
+        if (inputListener != null) {
+            ((InputManager) getSystemService(INPUT_SERVICE)).unregisterInputDeviceListener(inputListener);
+            inputListener = null;
+        }
+        dismissCarWindows();
+        if (shell != null) {
+            ShellLink link = shell;
+            shell = null;
+            shellDisplayId = -1;
+            touchDeviceName = null;
+            link.unbind();
         }
         if (virtualDisplay != null) {
             virtualDisplay.release();
@@ -377,6 +563,7 @@ public final class SecondScreenService extends Service {
     @Override public void onDestroy() {
         mainHandler.removeCallbacksAndMessages(null);
         releaseScreen();
+        shellCalls.shutdownNow();
         super.onDestroy();
     }
 }
