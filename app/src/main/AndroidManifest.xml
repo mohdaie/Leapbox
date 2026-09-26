@@ -18,12 +18,17 @@
         <intent>
             <action android:name="android.intent.action.DIAL" />
         </intent>
+        <!-- Lists launchable apps for the home-screen app picker. -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
 
     <application
         android:allowBackup="false"
         android:label="LeapBox"
-        android:icon="@drawable/ic_leapbox"
+        android:icon="@drawable/ic_launcher"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:usesCleartextTraffic="false">
         <activity

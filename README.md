@@ -1,4 +1,4 @@
-# LeapBox 0.5: car mode for the Leapmotor C10
+# LeapBox 0.5.1: car mode for the Leapmotor C10
 
 LeapBox shows your Android phone on the C10's screen through the car's built-in QDLink receiver, **without the QDLink phone app**. It talks to the car over USB (Android Open Accessory), completes the QDLink v2 handshake itself, and streams the phone screen as H.264.
 
@@ -7,7 +7,7 @@ While car mode runs:
 - the phone screen is **mirrored** to the car (1920 × 882); the C10's touchscreen controls the phone directly, as with QDLink;
 - the phone is **locked to landscape**, which matches the car screen, so the picture fills it and touches line up;
 - the phone is **dimmed to minimum brightness** (toggle on the car home screen) and kept awake, since casting stops when the phone locks;
-- LeapBox shows a **car home screen** with large tiles for Waze, Google Maps, YouTube, YouTube Music, Spotify, WhatsApp and Phone (whichever are installed);
+- LeapBox shows a **car home screen** (warm dark theme, serif clock and greeting) with large tiles for the apps you choose: tap **Edit apps** to add or remove any installed app and **↑** to reorder. Until you choose, it shows Waze, Google Maps, YouTube, YouTube Music, Spotify, WhatsApp and Phone when installed;
 - a floating **LB** button on top of every app returns to the LeapBox home screen.
 
 Rotation and brightness are restored when car mode stops.
@@ -24,9 +24,11 @@ Android asks for casting permission each time car mode starts; an app cannot ski
 
 - `CarService` — foreground media-projection service: mirrors the screen into a 1920 × 882 H.264 encoder, sends frames through `QdLinkUsbClient`, holds a dim screen wake lock, shows the LB button, applies and restores `PhoneTweaks`.
 - `QdLinkUsbClient` — the phone side of QDLink over USB: accessory discovery and permission, protocol detection (v2 `5A5A`, legacy v1 `!BIN` detected only), `CAR_INFO`/`PHONE_INFO` handshake, video packets, heartbeats.
-- `MainActivity` — setup screen (permissions, start, diagnostic log) and the landscape car home screen.
+- `MainActivity` — setup screen (permissions, start, diagnostic log), the landscape car home screen and the app picker.
+- `HomeApps` — which apps the home screen shows, in order (saved on the phone).
 - `PhoneTweaks` — landscape lock and brightness via system settings, with save/restore.
 - `Diag` — one copyable diagnostic log.
+- `Ui` — the warm colour palette and view helpers.
 
 ## Build
 

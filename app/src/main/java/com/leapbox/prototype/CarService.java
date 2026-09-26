@@ -320,8 +320,8 @@ public final class CarService extends Service {
 
         HomeBubble(Context context) {
             super(context);
-            fill.setColor(Color.argb(225, 21, 90, 166));
-            ring.setColor(Color.rgb(83, 215, 197));
+            fill.setColor(Color.argb(235, 217, 119, 87));
+            ring.setColor(Color.rgb(250, 249, 245));
             ring.setStyle(Paint.Style.STROKE);
             ring.setStrokeWidth(Ui.dp(context, 3));
             ring.setStrokeCap(Paint.Cap.ROUND);
