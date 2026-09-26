@@ -42,6 +42,8 @@ public final class SecondScreenService extends Service {
     private static final int WIDTH = 1920;
     private static final int HEIGHT = 882;
     static final int FPS = 24;
+    /** 1.5× scale: 1280×588 dp on the car. The phone's own density (~3×) left only ~300 dp of height. */
+    private static final int CAR_DENSITY = 240;
 
     final class LocalBinder extends Binder {
         SecondScreenService getService() { return SecondScreenService.this; }
@@ -133,7 +135,7 @@ public final class SecondScreenService extends Service {
         encoder.start();
 
         DisplayManager displayManager = (DisplayManager) getSystemService(DISPLAY_SERVICE);
-        int density = getResources().getDisplayMetrics().densityDpi;
+        int density = CAR_DENSITY;
         int displayFlags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
                 | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
                 | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY;
@@ -303,7 +305,7 @@ public final class SecondScreenService extends Service {
 
     String dashboardWazeSelected() {
         status = "Waze selected on LeapBox desktop; independent C10 touch path works";
-        return "Waze selected · Android Auto stage comes next";
+        return "Touch received from the C10 · car → LeapBox works";
     }
 
     /** Diagnostic only: Android may reject a normal third-party app on this virtual display. */

@@ -48,7 +48,7 @@ final class QdLinkUsbClient {
     private static final String ACTION_USB_STATE = "android.hardware.usb.action.USB_STATE";
     private static final long RETRY_MS = 3000;
     private static final int LOG_LINES = 80;
-    static final String VERSION = "0.3.1";
+    static final String VERSION = "0.3.2";
     private static final int USB_CHUNK = 512;
     private static final int MAX_MESSAGE = 8 * 1024 * 1024;
 

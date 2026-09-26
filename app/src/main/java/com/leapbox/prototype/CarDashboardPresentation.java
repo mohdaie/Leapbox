@@ -42,9 +42,13 @@ final class CarDashboardPresentation extends Presentation {
         clock.setTextSize(22);
         header.addView(clock);
         root.addView(header);
+        // Kept near the top so it is always on screen: off-screen views are never redrawn.
+        LinearLayout.LayoutParams barParams = Ui.block(context, 12);
+        barParams.height = Ui.dp(context, 4);
+        root.addView(new LiveBar(context), barParams);
 
         TextView title = Ui.text(context, "Your car screen. Your phone stays yours.", 35, Color.WHITE, true);
-        root.addView(title, Ui.block(context, 40));
+        root.addView(title, Ui.block(context, 28));
         TextView subtitle = Ui.text(context,
                 "LeapBox runs this dashboard independently from the phone display.", 18,
                 Color.rgb(178, 197, 222), false);
@@ -67,8 +71,6 @@ final class CarDashboardPresentation extends Presentation {
         card.setFocusable(true);
         card.setOnClickListener(view -> result.setText(service.dashboardWazeSelected()));
         root.addView(card, Ui.block(context, 30));
-
-        root.addView(new LiveBar(context), new LinearLayout.LayoutParams(-1, Ui.dp(context, 4)));
 
         TextView footer = Ui.text(context,
                 "LEAPBOX 0.3  ·  INDEPENDENT DISPLAY  ·  QDLINK USB", 13,
