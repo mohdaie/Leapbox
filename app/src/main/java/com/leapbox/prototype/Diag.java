@@ -5,7 +5,7 @@ import java.util.ArrayDeque;
 import java.util.Date;
 import java.util.Locale;
 
-/** One shared, copyable diagnostic log for USB, display and Shizuku events. */
+/** One shared, copyable diagnostic log for USB and car-mode events. */
 final class Diag {
     private static final int LINES = 120;
     private static final ArrayDeque<String> LOG = new ArrayDeque<>();

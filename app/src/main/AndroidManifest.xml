@@ -3,15 +3,21 @@
     <uses-feature android:name="android.hardware.usb.accessory" android:required="false" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <queries>
         <package android:name="com.waze" />
         <package android:name="com.google.android.apps.maps" />
         <package android:name="com.google.android.youtube" />
+        <package android:name="com.google.android.apps.youtube.music" />
         <package android:name="com.spotify.music" />
-        <package android:name="moe.shizuku.privileged.api" />
+        <package android:name="com.whatsapp" />
+        <intent>
+            <action android:name="android.intent.action.DIAL" />
+        </intent>
     </queries>
 
     <application
@@ -39,21 +45,8 @@
         </activity>
 
         <service
-            android:name=".SecondScreenService"
+            android:name=".CarService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-started independent car display, QDLink USB transport, and navigation projection" />
-        </service>
-
-        <!-- Receives the Shizuku binder so LeapBox can run its privileged helper (ShellService). -->
-        <provider
-            android:name="rikka.shizuku.ShizukuProvider"
-            android:authorities="${applicationId}.shizuku"
-            android:multiprocess="false"
-            android:enabled="true"
-            android:exported="true"
-            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+            android:foregroundServiceType="mediaProjection" />
     </application>
 </manifest>

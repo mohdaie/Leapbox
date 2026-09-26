@@ -10,18 +10,12 @@ android {
         applicationId 'com.leapbox.prototype'
         minSdk 29
         targetSdk 35
-        versionCode 12
-        versionName '0.4.4-all-touch-devices'
+        versionCode 13
+        versionName '0.5.0-mirror'
     }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
-}
-
-dependencies {
-    // Shizuku: lets LeapBox run a helper as the shell user (app-hosting car display, touch).
-    implementation 'dev.rikka.shizuku:api:13.1.5'
-    implementation 'dev.rikka.shizuku:provider:13.1.5'
 }

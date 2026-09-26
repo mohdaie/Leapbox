@@ -1,58 +1,84 @@
 package com.leapbox.prototype;
 
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
-import android.hardware.usb.UsbAccessory;
+import android.graphics.drawable.Drawable;
 import android.hardware.usb.UsbManager;
+import android.media.projection.MediaProjectionConfig;
+import android.media.projection.MediaProjectionManager;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.provider.Settings;
+import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.view.WindowManager;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.TextClock;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.util.Locale;
-
-import rikka.shizuku.Shizuku;
-
+/**
+ * Setup screen when car mode is off; the landscape car home screen (big app tiles) when it runs.
+ * Whatever the phone shows is mirrored to the C10.
+ */
 public final class MainActivity extends Activity {
-    private SecondScreenService screen;
-    private boolean bound;
-    private TextView status;
-    private TextView logView;
-    private TextView shizukuStatus;
-    private final Shizuku.OnRequestPermissionResultListener shizukuPermission = (code, result) -> {
-        if (code != ShellLink.PERMISSION_REQUEST) return;
-        boolean granted = result == android.content.pm.PackageManager.PERMISSION_GRANTED;
-        Diag.log("Shizuku permission " + (granted ? "granted" : "denied"));
-        tell(granted ? "Shizuku connected" : "Shizuku permission denied");
-        if (granted && screen != null) screen.connectShell();
-        refresh();
+    private static final int REQUEST_CAST = 41;
+    /** Car apps offered on the home screen when installed: package, label. */
+    private static final String[][] APPS = {
+            {"com.waze", "Waze"},
+            {"com.google.android.apps.maps", "Maps"},
+            {"com.google.android.youtube", "YouTube"},
+            {"com.google.android.apps.youtube.music", "YT Music"},
+            {"com.spotify.music", "Spotify"},
+            {"com.whatsapp", "WhatsApp"},
     };
-    private String accessoryStatus = "USB accessory: not checked";
+    private static final int CAR_BG = Color.rgb(11, 17, 28);
+    private static final int CAR_TILE = Color.rgb(27, 38, 56);
+    private static final int TEAL = Color.rgb(83, 215, 197);
+
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private CarService car;
+    private boolean bound;
+    private FrameLayout root;
+    private View setupView;
+    private View homeView;
+    private TextView setupStatus;
+    private TextView permissionStatus;
+    private TextView logView;
+    private TextView homeStatus;
+    private TextView dimButton;
+    private boolean showingHome;
 
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
-            screen = ((SecondScreenService.LocalBinder) binder).getService();
+            car = ((CarService.LocalBinder) binder).getService();
             refresh();
         }
         @Override public void onServiceDisconnected(ComponentName name) {
-            screen = null;
+            car = null;
             refresh();
         }
     };
 
-    private final Runnable update = new Runnable() {
+    private final Runnable ticker = new Runnable() {
         @Override public void run() {
             refresh();
             handler.postDelayed(this, 1000);
@@ -61,113 +87,95 @@ public final class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        buildInterface();
-        Shizuku.addRequestPermissionResultListener(shizukuPermission);
-        if (UsbManager.ACTION_USB_ACCESSORY_ATTACHED.equals(getIntent().getAction())) {
-            startLeapBox(SecondScreenService.ACTION_ACCESSORY);
-        }
-    }
-
-    @Override protected void onDestroy() {
-        Shizuku.removeRequestPermissionResultListener(shizukuPermission);
-        super.onDestroy();
+        root = new FrameLayout(this);
+        setupView = buildSetup();
+        homeView = buildHome();
+        root.addView(setupView);
+        root.addView(homeView);
+        setContentView(root);
+        handleAccessory(getIntent());
     }
 
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        if (UsbManager.ACTION_USB_ACCESSORY_ATTACHED.equals(intent.getAction())) {
-            startLeapBox(SecondScreenService.ACTION_ACCESSORY);
+        handleAccessory(intent);
+    }
+
+    private void handleAccessory(Intent intent) {
+        if (intent == null || !UsbManager.ACTION_USB_ACCESSORY_ATTACHED.equals(intent.getAction())) return;
+        if (CarService.running != null) {
+            startService(new Intent(this, CarService.class).setAction(CarService.ACTION_ACCESSORY));
+        } else {
+            tell("Car connected. Tap START CAR MODE.");
         }
     }
 
     @Override protected void onStart() {
         super.onStart();
-        bound = bindService(new Intent(this, SecondScreenService.class), connection,
-                Context.BIND_AUTO_CREATE);
-        handler.post(update);
+        bound = bindService(new Intent(this, CarService.class), connection, 0);
+        handler.post(ticker);
     }
 
     @Override protected void onStop() {
-        handler.removeCallbacks(update);
+        handler.removeCallbacks(ticker);
         if (bound) {
             unbindService(connection);
             bound = false;
         }
-        screen = null;
+        car = null;
         super.onStop();
     }
 
-    private void buildInterface() {
+    // ---- Setup screen (car mode off) ----
+
+    private View buildSetup() {
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(Ui.PAPER);
-        LinearLayout root = Ui.column(this);
-        root.setPadding(Ui.dp(this, 23), Ui.dp(this, 36),
-                Ui.dp(this, 23), Ui.dp(this, 34));
-        scroll.addView(root);
+        LinearLayout column = Ui.column(this);
+        column.setPadding(Ui.dp(this, 23), Ui.dp(this, 36), Ui.dp(this, 23), Ui.dp(this, 34));
+        scroll.addView(column);
 
-        root.addView(Ui.text(this, "LEAPBOX  /  PROTOTYPE 04", 13, Ui.BLUE, true));
-        root.addView(Ui.text(this, "One phone. Two independent screens.", 29, Ui.INK, true),
-                Ui.block(this, 10));
-        root.addView(Ui.text(this,
-                "LeapBox sends its own dashboard to the C10. Your physical phone screen is not captured and can be locked or used normally.",
+        column.addView(Ui.text(this, "LEAPBOX  /  CAR MODE", 13, Ui.BLUE, true));
+        column.addView(Ui.text(this, "Your phone on the C10 screen.", 29, Ui.INK, true), Ui.block(this, 10));
+        column.addView(Ui.text(this,
+                "LeapBox shows your phone on the car screen through QDLink, without the QDLink app. "
+                        + "Touch the car screen to control it. The phone turns landscape and dims while driving.",
                 16, Ui.MUTED, false), Ui.block(this, 8));
 
-        addSection(root, "01  LEAPBOX → C10",
-                "Press Start first, then plug in the C10 cable and open QDLink on the car. LeapBox keeps watching USB until the car appears. Force-stop or disable the QDLink phone app so it cannot take the connection, and pick LeapBox if Android asks which app to open.");
-        root.addView(action("Start LeapBox car desktop", Ui.BLUE, this::startLeapBox),
-                Ui.block(this, 17));
-        root.addView(action("Reconnect QDLink USB", Ui.MUTED,
-                () -> { if (screen != null) screen.reconnectCar(); else startLeapBox(); }), Ui.block(this, 10));
-        root.addView(action("Inspect connected car USB", Ui.MUTED,
-                this::inspectUsb), Ui.block(this, 10));
+        column.addView(section("01  ONE-TIME PERMISSIONS"), Ui.block(this, 28));
+        permissionStatus = Ui.text(this, "", 15, Ui.INK, false);
+        column.addView(permissionStatus, Ui.block(this, 8));
+        column.addView(action("Allow: modify system settings (landscape + dim)", Ui.MUTED, () -> openSettings(
+                new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, packageUri()))), Ui.block(this, 12));
+        column.addView(action("Allow: display over other apps (LeapBox button)", Ui.MUTED, () -> openSettings(
+                new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, packageUri()))), Ui.block(this, 10));
 
-        addSection(root, "02  APPS ON THE CAR (SHIZUKU)",
-                "Android only lets LeapBox open Waze or YouTube on the car screen, and move the car's touch off your phone, with Shizuku. Start Shizuku, then tap Connect Shizuku once and allow. Start LeapBox after that.");
-        shizukuStatus = Ui.text(this, "", 15, Ui.INK, true);
-        root.addView(shizukuStatus, Ui.block(this, 12));
-        root.addView(action("Connect Shizuku", Ui.BLUE, this::connectShizuku), Ui.block(this, 12));
-        root.addView(action("Open Waze on car", Ui.INK,
-                () -> openOnCar("com.waze", "Waze")), Ui.block(this, 10));
-        root.addView(action("Open YouTube on car", Ui.INK,
-                () -> openOnCar("com.google.android.youtube", "YouTube")), Ui.block(this, 10));
-        root.addView(action("Car touch: switch method", Ui.MUTED,
-                () -> { if (screen != null) tell(screen.toggleTouchMode()); refresh(); }), Ui.block(this, 10));
-        root.addView(action("Back (in car app)", Ui.MUTED,
-                () -> { if (screen != null) tell(screen.carBack()); }), Ui.block(this, 10));
-        root.addView(action("Show LeapBox home on car", Ui.MUTED,
-                () -> { if (screen != null) screen.showDashboard(); refresh(); }),
-                Ui.block(this, 10));
+        column.addView(section("02  DRIVE"), Ui.block(this, 28));
+        column.addView(Ui.text(this,
+                "Plug in the car cable and open QDLink on the car. Tap Start, then choose \"Entire screen\" and Start in Android's pop-up. "
+                        + "Close or disable the QDLink phone app first.", 15, Ui.MUTED, false), Ui.block(this, 7));
+        column.addView(action("START CAR MODE", Ui.BLUE, this::requestCast), Ui.block(this, 16));
 
-        addSection(root, "03  PHONE INDEPENDENCE",
-                "LeapBox now uses a background partial wake lock. It keeps the projection engine alive without deliberately keeping your phone display on.");
-        root.addView(action("Stop LeapBox", Ui.INK,
-                this::stopScreen), Ui.block(this, 17));
+        setupStatus = Ui.text(this, "", 14, Ui.INK, false);
+        setupStatus.setPadding(Ui.dp(this, 17), Ui.dp(this, 17), Ui.dp(this, 17), Ui.dp(this, 17));
+        setupStatus.setBackground(Ui.rounded(Color.WHITE, this, 16));
+        column.addView(setupStatus, Ui.block(this, 24));
 
-        status = Ui.text(this, "Checking LeapBox service…", 14, Ui.INK, false);
-        status.setPadding(Ui.dp(this, 17), Ui.dp(this, 17),
-                Ui.dp(this, 17), Ui.dp(this, 17));
-        status.setBackground(Ui.rounded(Color.WHITE, this, 16));
-        root.addView(status, Ui.block(this, 28));
-
-        addSection(root, "04  DIAGNOSTIC LOG",
-                "What LeapBox saw on USB and exchanged with the car. After a car test, copy it and send it back.");
-        root.addView(action("Copy diagnostic log", Ui.BLUE, this::copyLog), Ui.block(this, 17));
+        column.addView(section("03  DIAGNOSTIC LOG"), Ui.block(this, 28));
+        column.addView(action("Copy diagnostic log", Ui.BLUE, this::copyLog), Ui.block(this, 12));
         logView = Ui.text(this, "", 12, Ui.INK, false);
         logView.setTypeface(android.graphics.Typeface.MONOSPACE);
         logView.setTextIsSelectable(true);
         logView.setPadding(Ui.dp(this, 14), Ui.dp(this, 14), Ui.dp(this, 14), Ui.dp(this, 14));
         logView.setBackground(Ui.rounded(Color.WHITE, this, 16));
-        root.addView(logView, Ui.block(this, 12));
-        setContentView(scroll);
+        column.addView(logView, Ui.block(this, 12));
+        return scroll;
     }
 
-    private void addSection(LinearLayout root, String title, String details) {
-        TextView label = Ui.text(this, title, 14, Ui.BLUE, true);
-        root.addView(label, Ui.block(this, 31));
-        TextView description = Ui.text(this, details, 15, Ui.MUTED, false);
-        root.addView(description, Ui.block(this, 7));
+    private TextView section(String title) {
+        return Ui.text(this, title, 14, Ui.BLUE, true);
     }
 
     private View action(String title, int color, Runnable onClick) {
@@ -176,118 +184,201 @@ public final class MainActivity extends Activity {
         return button;
     }
 
-    private void startLeapBox() {
-        startLeapBox(SecondScreenService.ACTION_START);
+    private Uri packageUri() { return Uri.parse("package:" + getPackageName()); }
+
+    private void openSettings(Intent intent) {
+        try { startActivity(intent); }
+        catch (ActivityNotFoundException error) { tell("Open Settings → Apps → LeapBox to allow this."); }
     }
 
-    private void startLeapBox(String action) {
+    private void requestCast() {
+        MediaProjectionManager manager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+        Intent intent = Build.VERSION.SDK_INT >= 34
+                ? manager.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
+                : manager.createScreenCaptureIntent();
+        startActivityForResult(intent, REQUEST_CAST);
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_CAST) return;
+        if (resultCode != RESULT_OK || data == null) {
+            tell("Screen casting was not allowed.");
+            return;
+        }
+        Intent start = new Intent(this, CarService.class)
+                .setAction(CarService.ACTION_START)
+                .putExtra(CarService.EXTRA_CODE, resultCode)
+                .putExtra(CarService.EXTRA_DATA, data);
+        startForegroundService(start);
+        if (!bound) bound = bindService(new Intent(this, CarService.class), connection, 0);
+        handler.postDelayed(this::refresh, 600);
+    }
+
+    // ---- Car home screen (car mode on) ----
+
+    private View buildHome() {
+        LinearLayout screen = Ui.column(this);
+        screen.setBackgroundColor(CAR_BG);
+        screen.setPadding(Ui.dp(this, 36), Ui.dp(this, 18), Ui.dp(this, 36), Ui.dp(this, 18));
+
+        LinearLayout top = new LinearLayout(this);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        TextClock clock = new TextClock(this);
+        clock.setFormat12Hour("h:mm");
+        clock.setFormat24Hour("HH:mm");
+        clock.setTextColor(Color.WHITE);
+        clock.setTextSize(34);
+        clock.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        top.addView(clock);
+        homeStatus = Ui.text(this, "", 14, Color.rgb(158, 174, 194), false);
+        homeStatus.setPadding(Ui.dp(this, 20), 0, Ui.dp(this, 12), 0);
+        top.addView(homeStatus, new LinearLayout.LayoutParams(0, -2, 1));
+        dimButton = pill("Brighten phone", () -> {
+            if (car != null) car.setDimmed(!car.isDimmed());
+            refresh();
+        });
+        top.addView(dimButton);
+        LinearLayout.LayoutParams logParams = new LinearLayout.LayoutParams(-2, -2);
+        logParams.leftMargin = Ui.dp(this, 10);
+        top.addView(pill("Copy log", this::copyLog), logParams);
+        LinearLayout.LayoutParams stopParams = new LinearLayout.LayoutParams(-2, -2);
+        stopParams.leftMargin = Ui.dp(this, 10);
+        top.addView(pill("Stop", this::stopCar), stopParams);
+        screen.addView(top);
+
+        LinearLayout grid = Ui.column(this);
+        java.util.List<View> tiles = new java.util.ArrayList<>();
+        PackageManager packages = getPackageManager();
+        for (String[] app : APPS) {
+            Intent launch = packages.getLaunchIntentForPackage(app[0]);
+            if (launch == null) continue;
+            Drawable icon;
+            try { icon = packages.getApplicationIcon(app[0]); }
+            catch (PackageManager.NameNotFoundException error) { continue; }
+            tiles.add(tile(icon, app[1], () -> launch(launch)));
+        }
+        Intent dial = new Intent(Intent.ACTION_DIAL);
+        if (dial.resolveActivity(packages) != null) {
+            Drawable icon = dial.resolveActivityInfo(packages, 0).loadIcon(packages);
+            tiles.add(tile(icon, "Phone", () -> launch(new Intent(Intent.ACTION_DIAL))));
+        }
+        int perRow = 4;
+        for (int start = 0; start < tiles.size(); start += perRow) {
+            LinearLayout row = new LinearLayout(this);
+            for (int i = 0; i < perRow; i++) {
+                LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -1, 1);
+                if (i > 0) params.leftMargin = Ui.dp(this, 16);
+                View cell = start + i < tiles.size() ? tiles.get(start + i) : new View(this);
+                row.addView(cell, params);
+            }
+            LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, 0, 1);
+            if (start > 0) rowParams.topMargin = Ui.dp(this, 16);
+            grid.addView(row, rowParams);
+        }
+        LinearLayout.LayoutParams gridParams = new LinearLayout.LayoutParams(-1, 0, 1);
+        gridParams.topMargin = Ui.dp(this, 16);
+        screen.addView(grid, gridParams);
+        screen.setVisibility(View.GONE);
+        return screen;
+    }
+
+    private View tile(Drawable icon, String label, Runnable onClick) {
+        LinearLayout card = Ui.column(this);
+        card.setGravity(Gravity.CENTER);
+        card.setBackground(Ui.rounded(CAR_TILE, this, 26));
+        ImageView image = new ImageView(this);
+        image.setImageDrawable(icon);
+        int size = Ui.dp(this, 64);
+        card.addView(image, new LinearLayout.LayoutParams(size, size));
+        TextView name = Ui.text(this, label, 19, Color.WHITE, true);
+        name.setGravity(Gravity.CENTER);
+        card.addView(name, Ui.block(this, 10));
+        card.setClickable(true);
+        card.setFocusable(true);
+        card.setOnClickListener(view -> onClick.run());
+        return card;
+    }
+
+    private TextView pill(String title, Runnable onClick) {
+        TextView button = Ui.text(this, title, 15, Color.WHITE, true);
+        button.setGravity(Gravity.CENTER);
+        button.setPadding(Ui.dp(this, 20), Ui.dp(this, 10), Ui.dp(this, 20), Ui.dp(this, 10));
+        button.setBackground(Ui.rounded(CAR_TILE, this, 22));
+        button.setOnClickListener(view -> onClick.run());
+        return button;
+    }
+
+    private void launch(Intent intent) {
         try {
-            Intent intent = new Intent(this, SecondScreenService.class).setAction(action);
-            startForegroundService(intent);
-            tell("Starting independent LeapBox car session…");
-        } catch (RuntimeException error) {
-            tell("Cannot start LeapBox: " + error.getClass().getSimpleName());
+            startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (ActivityNotFoundException | SecurityException error) {
+            tell("Cannot open this app");
         }
     }
 
-    private void stopScreen() {
-        if (screen != null) screen.stopPrototype();
-        else stopService(new Intent(this, SecondScreenService.class));
-        tell("LeapBox stopped.");
-        refresh();
+    private void stopCar() {
+        startService(new Intent(this, CarService.class).setAction(CarService.ACTION_STOP));
+        handler.postDelayed(this::refresh, 400);
     }
 
-    private void connectShizuku() {
-        if (!ShellLink.running()) {
-            tell(ShellLink.state(this));
-            try {
-                Intent open = getPackageManager().getLaunchIntentForPackage("moe.shizuku.privileged.api");
-                if (open != null) startActivity(open);
-            } catch (RuntimeException ignored) { }
-            return;
-        }
-        if (ShellLink.permitted()) {
-            if (screen != null) screen.connectShell();
-            tell("Shizuku ready");
+    private void showHome(boolean home) {
+        if (home == showingHome) return;
+        showingHome = home;
+        homeView.setVisibility(home ? View.VISIBLE : View.GONE);
+        setupView.setVisibility(home ? View.GONE : View.VISIBLE);
+        setRequestedOrientation(home ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                : ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+        if (home) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         } else {
-            ShellLink.requestPermission();
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         }
-        refresh();
+        WindowInsetsController insets = getWindow().getInsetsController();
+        if (insets != null) {
+            if (home) {
+                insets.hide(WindowInsets.Type.systemBars());
+                insets.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            } else {
+                insets.show(WindowInsets.Type.systemBars());
+            }
+        }
     }
 
-    private void openOnCar(String packageName, String label) {
-        if (screen == null || !screen.isReady()) {
-            tell("Start LeapBox first.");
+    // ---- Status and log ----
+
+    private void refresh() {
+        CarService service = car != null ? car : CarService.running;
+        boolean on = service != null && CarService.running != null;
+        showHome(on);
+        if (on) {
+            homeStatus.setText(service.carSummary());
+            dimButton.setText(service.isDimmed() ? "Brighten phone" : "Dim phone");
             return;
         }
-        tell(screen.openOnCar(packageName, label));
-        refresh();
+        boolean write = PhoneTweaks.allowed(this);
+        boolean overlay = Settings.canDrawOverlays(this);
+        permissionStatus.setText((write ? "✓" : "✗") + "  Modify system settings (landscape + dim)\n"
+                + (overlay ? "✓" : "✗") + "  Display over other apps (LeapBox button, smooth video)");
+        setupStatus.setText("Car mode: off\n" + usbSummary());
+        String events = Diag.text();
+        logView.setText(events.isEmpty() ? "No events yet." : events);
+    }
+
+    private String usbSummary() {
+        UsbManager usb = (UsbManager) getSystemService(USB_SERVICE);
+        android.hardware.usb.UsbAccessory[] accessories = usb == null ? null : usb.getAccessoryList();
+        if (accessories == null || accessories.length == 0) return "Car USB: not detected";
+        return "Car USB: " + accessories[0].getManufacturer() + " / " + accessories[0].getModel() + " detected";
     }
 
     private void copyLog() {
-        String text = diagnosticText();
-        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        CarService service = car != null ? car : CarService.running;
+        String text = (service == null ? "Car mode: off" : service.details()) + "\n\n" + Diag.text();
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         if (clipboard == null) return;
         clipboard.setPrimaryClip(ClipData.newPlainText("LeapBox diagnostic log", text));
         tell("Diagnostic log copied");
-    }
-
-    private String diagnosticText() {
-        String body = (shizukuStatus == null ? "" : shizukuStatus.getText() + "\n")
-                + (status == null ? "" : status.getText().toString());
-        String events = Diag.text();
-        return body + "\n\n" + (events.isEmpty() ? "(no USB events yet; press Start first)" : events);
-    }
-
-    private void inspectUsb() {
-        UsbManager usb = (UsbManager) getSystemService(USB_SERVICE);
-        UsbAccessory[] accessories = usb == null ? null : usb.getAccessoryList();
-        if (accessories == null || accessories.length == 0) {
-            accessoryStatus = "USB accessory: none detected";
-        } else {
-            UsbAccessory car = accessories[0];
-            accessoryStatus = "USB accessory: " + car.getManufacturer() + " / "
-                    + car.getModel() + " / " + car.getVersion()
-                    + " · " + car.getDescription()
-                    + " · permission=" + usb.hasPermission(car);
-        }
-        tell(accessoryStatus);
-        refresh();
-    }
-
-    private void refresh() {
-        if (status == null) return;
-        if (shizukuStatus != null) {
-            shizukuStatus.setText(screen != null && screen.isReady()
-                    ? screen.shellState() : ShellLink.state(this));
-        }
-        if (logView != null) {
-            String events = Diag.text();
-            logView.setText(events.isEmpty() ? "No USB events yet." : events);
-        }
-        if (screen == null || !screen.isReady()) {
-            status.setText("LeapBox display: inactive\nPhone display: independent\n"
-                    + accessoryStatus + "\nStart LeapBox after opening QDLink on the C10.");
-            return;
-        }
-        String canvas = screen.carWidth() > 0
-                ? screen.carWidth() + "×" + screen.carHeight() : "unknown";
-        status.setText(String.format(Locale.US,
-                "LeapBox display: #%d · 1920×882\n"
-                        + "Phone display: independent / may lock\n"
-                        + "Background wake: %s\n"
-                        + "Encoded locally: %,d frames (%.1f MB)\n"
-                        + "QDLink: %s · protocol %s · car canvas %s\n"
-                        + "%s\n"
-                        + "Car video requested: %s · sent %,d frames (%,d key)\n"
-                        + "C10 touch events: %,d\n"
-                        + "%s\n%s",
-                screen.displayId(), screen.isAwake() ? "held" : "not held",
-                screen.framesEncoded(), screen.bytesEncoded() / 1_000_000.0,
-                screen.carConnected() ? "connected" : "not connected", screen.carProtocol(), canvas,
-                screen.usbState(),
-                screen.carPlaying() ? "yes" : "no", screen.carFramesSent(), screen.carKeyFrames(),
-                screen.carTouchEvents(), accessoryStatus, screen.carStatus()));
     }
 
     private void tell(String message) {
