@@ -302,6 +302,13 @@ public final class CarService extends Service {
         }
     }
 
+    /** Hidden while the LeapBox home screen is in front, where it would cover the buttons. */
+    void setBubbleHidden(boolean hidden) {
+        main.post(() -> {
+            if (bubble != null) bubble.setVisibility(hidden ? View.GONE : View.VISIBLE);
+        });
+    }
+
     void openHome() {
         Intent home = new Intent(this, MainActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);

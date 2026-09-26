@@ -122,6 +122,37 @@ public final class MainActivity extends Activity {
         handler.post(ticker);
     }
 
+    @Override protected void onResume() {
+        super.onResume();
+        CarService service = CarService.running;
+        if (service != null) service.setBubbleHidden(true);
+    }
+
+    @Override protected void onPause() {
+        CarService service = CarService.running;
+        if (service != null) service.setBubbleHidden(false);
+        super.onPause();
+    }
+
+    /** Small terracotta dot that gently pulses, redrawn every frame. */
+    private static final class LiveDot extends View {
+        private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+
+        LiveDot(Context context) {
+            super(context);
+            paint.setColor(Ui.CLAY);
+        }
+
+        @Override protected void onDraw(android.graphics.Canvas canvas) {
+            float phase = (android.os.SystemClock.uptimeMillis() % 2000) / 2000f;
+            float pulse = 0.55f + 0.45f * (float) Math.abs(Math.sin(Math.PI * phase));
+            paint.setAlpha((int) (255 * pulse));
+            float radius = Math.min(getWidth(), getHeight()) / 2f;
+            canvas.drawCircle(getWidth() / 2f, getHeight() / 2f, radius * pulse, paint);
+            postInvalidateDelayed(33);
+        }
+    }
+
     @Override protected void onStop() {
         handler.removeCallbacks(ticker);
         if (bound) {
@@ -267,8 +298,15 @@ public final class MainActivity extends Activity {
         LinearLayout titles = Ui.column(this);
         greeting = Ui.serif(this, "", 26, Ui.CREAM);
         titles.addView(greeting);
+        LinearLayout statusRow = new LinearLayout(this);
+        statusRow.setGravity(Gravity.CENTER_VERTICAL);
+        // Its animation keeps video flowing to the car while the home screen is otherwise still.
+        int dotSize = Ui.dp(this, 10);
+        statusRow.addView(new LiveDot(this), new LinearLayout.LayoutParams(dotSize, dotSize));
         homeStatus = Ui.text(this, "", 13, Ui.SAND, false);
-        titles.addView(homeStatus, Ui.block(this, 2));
+        homeStatus.setPadding(Ui.dp(this, 8), 0, 0, 0);
+        statusRow.addView(homeStatus);
+        titles.addView(statusRow, Ui.block(this, 4));
         top.addView(titles, new LinearLayout.LayoutParams(0, -2, 1));
         TextClock clock = new TextClock(this);
         clock.setFormat12Hour("h:mm");
@@ -529,6 +567,7 @@ public final class MainActivity extends Activity {
         boolean on = service != null && CarService.running != null;
         showHome(on);
         if (on) {
+            if (hasWindowFocus()) service.setBubbleHidden(true);
             greeting.setText(greetingFor(Calendar.getInstance().get(Calendar.HOUR_OF_DAY)));
             homeStatus.setText(service.carSummary());
             dimButton.setText(service.isDimmed() ? "Brighten phone" : "Dim phone");
