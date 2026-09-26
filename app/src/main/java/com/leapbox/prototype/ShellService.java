@@ -46,6 +46,8 @@ public final class ShellService extends Binder {
 
     private static final String SHELL_PACKAGE = "com.android.shell";
     // Hidden VirtualDisplay flags (DisplayManager) used by scrcpy for app-hosting displays.
+    /** Gives the display an input viewport, so a touchscreen can be linked to it. */
+    private static final int FLAG_SUPPORTS_TOUCH = 1 << 6;
     private static final int FLAG_TRUSTED = 1 << 10;
     private static final int FLAG_OWN_DISPLAY_GROUP = 1 << 11;
     private static final int FLAG_ALWAYS_UNLOCKED = 1 << 12;
@@ -87,8 +89,8 @@ public final class ShellService extends Binder {
                     result = launch(data.readInt(), data.readString());
                     break;
                 case START_TOUCH:
-                    result = startTouch(data.readString(), data.readInt(), data.readInt(),
-                            data.readInt(), data.readInt(), data.readInt(), data.readInt());
+                    result = startTouch(data.readString(), data.readString(), data.readInt(),
+                            data.readInt(), data.readInt(), data.readInt(), data.readInt(), data.readInt());
                     break;
                 case STOP_TOUCH:
                     stopTouch();
@@ -119,7 +121,8 @@ public final class ShellService extends Binder {
         DisplayManager manager = shellDisplayManager();
         int base = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
                 | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
-                | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY;
+                | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+                | FLAG_SUPPORTS_TOUCH;
         int[] attempts = {
                 base | FLAG_TRUSTED | FLAG_OWN_DISPLAY_GROUP | FLAG_ALWAYS_UNLOCKED | FLAG_OWN_FOCUS,
                 base | FLAG_TRUSTED | FLAG_OWN_DISPLAY_GROUP,
@@ -159,11 +162,18 @@ public final class ShellService extends Binder {
                 "--windowingMode", "1", "-f", "0x10000000", "-n", component);
     }
 
-    private String startTouch(String deviceName, int vendor, int product, int deviceId, int displayId,
-                              int width, int height) throws Exception {
+    private String startTouch(String deviceName, String descriptor, int vendor, int product, int deviceId,
+                              int displayId, int width, int height) throws Exception {
         stopTouch();
-        TouchForwarder forwarder = new TouchForwarder(deviceName, vendor, product, deviceId, displayId,
-                width, height);
+        String uniqueId = null;
+        if (display != null) {
+            try {
+                uniqueId = (String) android.view.Display.class.getMethod("getUniqueId")
+                        .invoke(display.getDisplay());
+            } catch (ReflectiveOperationException ignored) { }
+        }
+        TouchForwarder forwarder = new TouchForwarder(deviceName, descriptor, uniqueId, vendor, product,
+                deviceId, displayId, width, height);
         String result = forwarder.start();
         touch = forwarder;
         return result;
@@ -221,6 +231,12 @@ public final class ShellService extends Binder {
         private static final int BTN_LEFT = 0x110, BTN_TOUCH = 0x14a;
 
         private final String deviceName;
+        private final String descriptor;
+        private final String displayUniqueId;
+        private volatile boolean linked;
+        private String linkMethod = "";
+        private String location;
+        private final StringBuilder samples = new StringBuilder();
         private final int vendor;
         private final int product;
         private final int deviceId;
@@ -237,9 +253,11 @@ public final class ShellService extends Binder {
         private String path;
         private int minX, maxX = 1, minY, maxY = 1;
 
-        TouchForwarder(String deviceName, int vendor, int product, int deviceId, int displayId,
-                       int width, int height) {
+        TouchForwarder(String deviceName, String descriptor, String displayUniqueId, int vendor, int product,
+                       int deviceId, int displayId, int width, int height) {
             this.deviceName = deviceName;
+            this.descriptor = descriptor;
+            this.displayUniqueId = displayUniqueId;
             this.vendor = vendor;
             this.product = product;
             this.deviceId = deviceId;
@@ -249,17 +267,110 @@ public final class ShellService extends Binder {
         }
 
         String start() throws Exception {
-            if (!findDevice()) {
-                return String.format(Locale.US, "error: no /dev/input device \"%s\" %04x:%04x",
-                        deviceName, vendor, product);
+            // Preferred: let Android itself route the car touchscreen to the car display, as it
+            // does for head-unit touchscreens. Android then scales touches and the phone ignores them.
+            boolean found = findDevice();
+            String link = linkToDisplay();
+            if (linked) return "touch: linked by Android to car display (" + link + ")";
+
+            if (!found) {
+                return String.format(Locale.US, "error: link failed (%s) and no /dev/input device \"%s\" %04x:%04x",
+                        link, deviceName, vendor, product);
             }
+            if (maxX <= 1) maxX = width - 1;
+            if (maxY <= 1) maxY = height - 1;
             input = new FileInputStream(path);
             running = true;
             thread = new Thread(this::readLoop, "LeapBox-touch");
             thread.start();
             disabled = setDeviceEnabled(false);
-            return "touch: " + path + " x " + minX + ".." + maxX + " y " + minY + ".." + maxY
+            return "touch: forwarding " + path + " x " + minX + ".." + maxX + " y " + minY + ".." + maxY
+                    + " (link failed: " + link + ")"
                     + (disabled ? ", phone input disabled" : ", phone input NOT disabled: " + lastError);
+        }
+
+        /** Associates the input device with the car display; returns a short result text. */
+        private String linkToDisplay() {
+            if (displayUniqueId == null) return "no display id";
+            try {
+                Object service = inputService();
+                Class<?> type = service.getClass();
+                try {
+                    // Android 15+
+                    type.getMethod("addUniqueIdAssociationByDescriptor", String.class, String.class)
+                            .invoke(service, descriptor, displayUniqueId);
+                    linkMethod = "descriptor";
+                } catch (NoSuchMethodException older) {
+                    if (location == null || location.isEmpty()) return "no input port for older Android";
+                    try {
+                        type.getMethod("addUniqueIdAssociationByPort", String.class, String.class)
+                                .invoke(service, location, displayUniqueId);
+                    } catch (NoSuchMethodException android14) {
+                        type.getMethod("addUniqueIdAssociation", String.class, String.class)
+                                .invoke(service, location, displayUniqueId);
+                    }
+                    linkMethod = "port " + location;
+                }
+                Thread.sleep(400);
+                int associated = associatedDisplay();
+                linked = associated == displayId;
+                return "by " + linkMethod + " → device now on display " + associated;
+            } catch (ReflectiveOperationException | RuntimeException | InterruptedException error) {
+                return describeError(error);
+            }
+        }
+
+        private void unlink() {
+            if (!linked) return;
+            linked = false;
+            try {
+                Object service = inputService();
+                Class<?> type = service.getClass();
+                if ("descriptor".equals(linkMethod)) {
+                    type.getMethod("removeUniqueIdAssociationByDescriptor", String.class).invoke(service, descriptor);
+                } else {
+                    try {
+                        type.getMethod("removeUniqueIdAssociationByPort", String.class).invoke(service, location);
+                    } catch (NoSuchMethodException android14) {
+                        type.getMethod("removeUniqueIdAssociation", String.class).invoke(service, location);
+                    }
+                }
+            } catch (ReflectiveOperationException | RuntimeException error) {
+                lastError = "unlink: " + describeError(error);
+            }
+        }
+
+        /** The display Android currently routes this device to (hidden InputDevice API). */
+        private int associatedDisplay() {
+            try {
+                Object manager;
+                try {
+                    manager = Class.forName("android.hardware.input.InputManagerGlobal")
+                            .getMethod("getInstance").invoke(null);
+                } catch (ClassNotFoundException oldAndroid) {
+                    manager = Class.forName("android.hardware.input.InputManager")
+                            .getMethod("getInstance").invoke(null);
+                }
+                InputDevice device = (InputDevice) manager.getClass().getMethod("getInputDevice", int.class)
+                        .invoke(manager, deviceId);
+                if (device == null) return -2;
+                return (Integer) InputDevice.class.getMethod("getAssociatedDisplayId").invoke(device);
+            } catch (ReflectiveOperationException | RuntimeException error) {
+                return -3;
+            }
+        }
+
+        private static Object inputService() throws ReflectiveOperationException {
+            IBinder binder = (IBinder) Class.forName("android.os.ServiceManager")
+                    .getMethod("getService", String.class).invoke(null, "input");
+            return Class.forName("android.hardware.input.IInputManager$Stub")
+                    .getMethod("asInterface", IBinder.class).invoke(null, binder);
+        }
+
+        private static String describeError(Throwable error) {
+            Throwable cause = error instanceof java.lang.reflect.InvocationTargetException
+                    && error.getCause() != null ? error.getCause() : error;
+            return cause.getClass().getSimpleName() + ": " + cause.getMessage();
         }
 
         void stop() {
@@ -267,12 +378,15 @@ public final class ShellService extends Binder {
             try { if (input != null) input.close(); } catch (IOException ignored) { }
             if (disabled) setDeviceEnabled(true);
             disabled = false;
+            unlink();
         }
 
         String status() {
-            return String.format(Locale.US, "touch: %s events=%d injected=%d%s%s", path, events,
-                    injected, disabled ? " phone-input-off" : "",
-                    lastError.isEmpty() ? "" : " last error: " + lastError);
+            if (linked) return "touch: linked to car display by Android";
+            return String.format(Locale.US, "touch: %s x..%d y..%d events=%d injected=%d%s%s%s", path,
+                    maxX, maxY, events, injected, disabled ? " phone-input-off" : "",
+                    lastError.isEmpty() ? "" : " last error: " + lastError,
+                    samples.length() == 0 ? "" : " first: " + samples);
         }
 
         /**
@@ -310,6 +424,10 @@ public final class ShellService extends Binder {
                         maxX = 1;
                         maxY = 1;
                     }
+                } else if (match && line.startsWith("location:")) {
+                    int open = line.indexOf('"');
+                    int close = line.lastIndexOf('"');
+                    location = open >= 0 && close > open ? line.substring(open + 1, close) : "";
                 } else if (match) {
                     if (line.startsWith("ABS_MT_POSITION_X") || (line.startsWith("ABS_X") && maxX == 1)) {
                         minX = rangeValue(line, "min");
@@ -358,6 +476,13 @@ public final class ShellService extends Binder {
                     int code = event.getShort(size - 6) & 0xffff;
                     int value = event.getInt(size - 4);
                     events++;
+                    if (events <= 12 && type != EV_SYN) {
+                        samples.append(Integer.toHexString(type)).append('/')
+                                .append(Integer.toHexString(code)).append('=').append(value).append(' ');
+                    }
+                    // Unknown or too-small ranges: learn them from the values the car actually sends.
+                    if (type == EV_ABS && (code == ABS_MT_POSITION_X || code == ABS_X) && value > maxX) maxX = value;
+                    if (type == EV_ABS && (code == ABS_MT_POSITION_Y || code == ABS_Y) && value > maxY) maxY = value;
                     if (type == EV_ABS) {
                         if (code == ABS_MT_SLOT) slot = value;
                         else if (slot != 0) continue;
@@ -424,7 +549,7 @@ public final class ShellService extends Binder {
                         .invoke(service, deviceId);
                 return true;
             } catch (ReflectiveOperationException | RuntimeException error) {
-                lastError = (enabled ? "enable: " : "disable: ") + error;
+                lastError = (enabled ? "enable: " : "disable: ") + describeError(error);
                 return false;
             }
         }

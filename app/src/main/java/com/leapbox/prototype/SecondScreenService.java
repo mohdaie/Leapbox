@@ -275,15 +275,18 @@ public final class SecondScreenService extends Service {
             Diag.log("Car touch: no external touchscreen yet; it appears when the car's touch link connects");
             return;
         }
-        if (car.getName().equals(touchDeviceName) && link.touchStatus().startsWith("touch: /")) return;
+        String current = link.touchStatus();
+        if (car.getName().equals(touchDeviceName)
+                && (current.startsWith("touch: /") || current.startsWith("touch: linked"))) return;
         touchDeviceName = car.getName();
         String name = car.getName();
         int deviceId = car.getId();
         int vendor = car.getVendorId();
         int product = car.getProductId();
+        String descriptor = car.getDescriptor();
         Diag.log("Car touch device: " + describe(car));
         shellCalls.execute(() -> {
-            String result = link.startTouch(name, vendor, product, deviceId, id, WIDTH, HEIGHT);
+            String result = link.startTouch(name, descriptor, vendor, product, deviceId, id, WIDTH, HEIGHT);
             Diag.log("Car touch → car display: " + result);
             if (result.startsWith("error")) touchDeviceName = null;
         });
