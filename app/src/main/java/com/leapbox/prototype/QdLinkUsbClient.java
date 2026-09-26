@@ -48,7 +48,7 @@ final class QdLinkUsbClient {
     private static final String ACTION_USB_STATE = "android.hardware.usb.action.USB_STATE";
     private static final long RETRY_MS = 3000;
     private static final int LOG_LINES = 80;
-    static final String VERSION = "0.3.3";
+    static final String VERSION = "0.3.4";
     private static final int USB_CHUNK = 512;
     private static final int MAX_MESSAGE = 8 * 1024 * 1024;
 
@@ -340,7 +340,9 @@ final class QdLinkUsbClient {
         }
         JSONObject para = root.optJSONObject("PARA");
         String cmd = root.optString("CMD", "");
-        if (!"HEARTBEAT".equals(cmd)) log("car → " + trim(jsonText, 160));
+        // Setup messages are logged in full: they describe the car's touch and control options.
+        boolean setup = cmd.endsWith("_INFO") || cmd.endsWith("_REQ") || cmd.isEmpty();
+        if (!"HEARTBEAT".equals(cmd)) log("car → " + trim(jsonText, setup ? 2000 : 160));
 
         switch (cmd) {
             case "CAR_INFO":
@@ -574,7 +576,9 @@ final class QdLinkUsbClient {
     private void logSent(byte[] message) {
         if (message.length <= 16 || message[10] == 1) return;
         String json = new String(message, 16, message.length - 16, StandardCharsets.UTF_8);
-        if (!json.contains("\"HEARTBEAT\"")) log("phone → " + trim(json, 160));
+        if (!json.contains("\"HEARTBEAT\"")) {
+            log("phone → " + trim(json, json.contains("\"PHONE_INFO\"") ? 2000 : 160));
+        }
     }
 
     private void writePadded(byte[] data) throws IOException {
