@@ -24,7 +24,21 @@ final class ShellLink {
     private final Shizuku.UserServiceArgs args;
     private final Listener listener;
     private volatile IBinder remote;
-    private boolean bound;
+    private volatile boolean bound;
+    private volatile boolean wanted;
+    /** Shizuku restarted (e.g. after a USB mode change killed it): bind the helper again. */
+    private final Shizuku.OnBinderReceivedListener shizukuStarted = () -> {
+        Diag.log("Shizuku: service available");
+        if (wanted) bind();
+    };
+    private final Shizuku.OnBinderDeadListener shizukuStopped = () -> {
+        Diag.log("Shizuku: service STOPPED (tap Start in Shizuku again)");
+        bound = false;
+        if (remote != null) {
+            remote = null;
+            ShellLink.this.listener.onShellDisconnected();
+        }
+    };
 
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -39,6 +53,7 @@ final class ShellLink {
 
         @Override public void onServiceDisconnected(ComponentName name) {
             remote = null;
+            bound = false;
             Diag.log("Shizuku: privileged helper disconnected");
             listener.onShellDisconnected();
         }
@@ -52,6 +67,8 @@ final class ShellLink {
                 .processNameSuffix("shell")
                 .debuggable(false)
                 .version(SERVICE_VERSION);
+        Shizuku.addBinderReceivedListener(shizukuStarted);
+        Shizuku.addBinderDeadListener(shizukuStopped);
     }
 
     /** Human-readable Shizuku state for the phone UI. */
@@ -95,6 +112,7 @@ final class ShellLink {
     }
 
     void bind() {
+        wanted = true;
         if (bound || !permitted()) return;
         try {
             Shizuku.bindUserService(args, connection);
@@ -106,6 +124,9 @@ final class ShellLink {
     }
 
     void unbind() {
+        wanted = false;
+        Shizuku.removeBinderReceivedListener(shizukuStarted);
+        Shizuku.removeBinderDeadListener(shizukuStopped);
         if (!bound) return;
         bound = false;
         try {
@@ -142,9 +163,12 @@ final class ShellLink {
         });
     }
 
-    String startTouch(String deviceName, int deviceId, int displayId, int width, int height) {
+    String startTouch(String deviceName, int vendor, int product, int deviceId, int displayId,
+                      int width, int height) {
         return call(ShellService.START_TOUCH, data -> {
             data.writeString(deviceName);
+            data.writeInt(vendor);
+            data.writeInt(product);
             data.writeInt(deviceId);
             data.writeInt(displayId);
             data.writeInt(width);

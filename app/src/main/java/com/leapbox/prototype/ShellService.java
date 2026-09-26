@@ -88,7 +88,7 @@ public final class ShellService extends Binder {
                     break;
                 case START_TOUCH:
                     result = startTouch(data.readString(), data.readInt(), data.readInt(),
-                            data.readInt(), data.readInt());
+                            data.readInt(), data.readInt(), data.readInt(), data.readInt());
                     break;
                 case STOP_TOUCH:
                     stopTouch();
@@ -159,10 +159,11 @@ public final class ShellService extends Binder {
                 "--windowingMode", "1", "-f", "0x10000000", "-n", component);
     }
 
-    private String startTouch(String deviceName, int deviceId, int displayId, int width, int height)
-            throws Exception {
+    private String startTouch(String deviceName, int vendor, int product, int deviceId, int displayId,
+                              int width, int height) throws Exception {
         stopTouch();
-        TouchForwarder forwarder = new TouchForwarder(deviceName, deviceId, displayId, width, height);
+        TouchForwarder forwarder = new TouchForwarder(deviceName, vendor, product, deviceId, displayId,
+                width, height);
         String result = forwarder.start();
         touch = forwarder;
         return result;
@@ -220,6 +221,8 @@ public final class ShellService extends Binder {
         private static final int BTN_LEFT = 0x110, BTN_TOUCH = 0x14a;
 
         private final String deviceName;
+        private final int vendor;
+        private final int product;
         private final int deviceId;
         private final int displayId;
         private final int width;
@@ -234,8 +237,11 @@ public final class ShellService extends Binder {
         private String path;
         private int minX, maxX = 1, minY, maxY = 1;
 
-        TouchForwarder(String deviceName, int deviceId, int displayId, int width, int height) {
+        TouchForwarder(String deviceName, int vendor, int product, int deviceId, int displayId,
+                       int width, int height) {
             this.deviceName = deviceName;
+            this.vendor = vendor;
+            this.product = product;
             this.deviceId = deviceId;
             this.displayId = displayId;
             this.width = width;
@@ -243,7 +249,10 @@ public final class ShellService extends Binder {
         }
 
         String start() throws Exception {
-            if (!findDevice()) return "error: no /dev/input device named \"" + deviceName + "\"";
+            if (!findDevice()) {
+                return String.format(Locale.US, "error: no /dev/input device \"%s\" %04x:%04x",
+                        deviceName, vendor, product);
+            }
             input = new FileInputStream(path);
             running = true;
             thread = new Thread(this::readLoop, "LeapBox-touch");
@@ -266,20 +275,41 @@ public final class ShellService extends Binder {
                     lastError.isEmpty() ? "" : " last error: " + lastError);
         }
 
-        /** Parses `getevent -pl` for the device path and its coordinate ranges. */
+        /**
+         * Parses `getevent -il` for the device path and its coordinate ranges. The C10's touch
+         * device has an empty name, so vendor and product ids decide when they are known.
+         */
         private boolean findDevice() throws Exception {
-            String dump = exec("getevent", "-pl");
+            String dump = exec("getevent", "-il");
+            return findDevice(dump, true) || findDevice(dump, false);
+        }
+
+        private boolean findDevice(String dump, boolean useIds) {
             String current = null;
+            int devVendor = -1, devProduct = -1;
             boolean match = false;
             for (String raw : dump.split(" \\| ")) {
                 String line = raw.trim();
+                if (line.startsWith("ABS (0003):")) line = line.substring("ABS (0003):".length()).trim();
                 if (line.startsWith("add device")) {
                     int slash = line.indexOf('/');
                     current = slash >= 0 ? line.substring(slash) : null;
+                    devVendor = -1;
+                    devProduct = -1;
                     match = false;
+                } else if (line.startsWith("vendor")) {
+                    devVendor = hex(line.substring("vendor".length()));
+                } else if (line.startsWith("product")) {
+                    devProduct = hex(line.substring("product".length()));
                 } else if (line.startsWith("name:")) {
-                    match = line.contains("\"" + deviceName + "\"");
-                    if (match) path = current;
+                    boolean ids = !useIds || (vendor == 0 && product == 0)
+                            || (devVendor == vendor && devProduct == product);
+                    match = path == null && ids && line.contains("\"" + deviceName + "\"");
+                    if (match) {
+                        path = current;
+                        maxX = 1;
+                        maxY = 1;
+                    }
                 } else if (match) {
                     if (line.startsWith("ABS_MT_POSITION_X") || (line.startsWith("ABS_X") && maxX == 1)) {
                         minX = rangeValue(line, "min");
@@ -291,6 +321,11 @@ public final class ShellService extends Binder {
                 }
             }
             return path != null;
+        }
+
+        private static int hex(String value) {
+            try { return Integer.parseInt(value.trim(), 16); }
+            catch (NumberFormatException error) { return -1; }
         }
 
         private static int rangeValue(String line, String key) {

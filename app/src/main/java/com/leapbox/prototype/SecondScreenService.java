@@ -250,8 +250,9 @@ public final class SecondScreenService extends Service {
     }
 
     private static String describe(InputDevice device) {
-        return "\"" + device.getName() + "\" #" + device.getId() + " sources=0x"
-                + Integer.toHexString(device.getSources());
+        return String.format(java.util.Locale.US, "\"%s\" #%d %04x:%04x sources=0x%x",
+                device.getName(), device.getId(), device.getVendorId(), device.getProductId(),
+                device.getSources());
     }
 
     private static InputDevice findCarTouchDevice() {
@@ -274,12 +275,15 @@ public final class SecondScreenService extends Service {
             Diag.log("Car touch: no external touchscreen yet; it appears when the car's touch link connects");
             return;
         }
-        if (car.getName().equals(touchDeviceName)) return;
+        if (car.getName().equals(touchDeviceName) && link.touchStatus().startsWith("touch: /")) return;
         touchDeviceName = car.getName();
         String name = car.getName();
         int deviceId = car.getId();
+        int vendor = car.getVendorId();
+        int product = car.getProductId();
+        Diag.log("Car touch device: " + describe(car));
         shellCalls.execute(() -> {
-            String result = link.startTouch(name, deviceId, id, WIDTH, HEIGHT);
+            String result = link.startTouch(name, vendor, product, deviceId, id, WIDTH, HEIGHT);
             Diag.log("Car touch → car display: " + result);
             if (result.startsWith("error")) touchDeviceName = null;
         });
@@ -291,7 +295,9 @@ public final class SecondScreenService extends Service {
         int id = shellDisplayId;
         if (link == null || id < 0) {
             String state = ShellLink.state(this);
-            Diag.log("Open " + label + " on car: not possible; " + state);
+            Diag.log("Open " + label + " on car: not possible; " + state
+                    + (link != null && ShellLink.permitted() ? " (helper reconnecting)" : ""));
+            if (link != null) link.bind();
             return label + " needs Shizuku · " + state;
         }
         Intent launch = getPackageManager().getLaunchIntentForPackage(packageName);

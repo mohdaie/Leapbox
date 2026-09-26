@@ -10,8 +10,8 @@ android {
         applicationId 'com.leapbox.prototype'
         minSdk 29
         targetSdk 35
-        versionCode 8
-        versionName '0.4.0-shizuku'
+        versionCode 9
+        versionName '0.4.1-shizuku-reconnect'
     }
 
     compileOptions {
