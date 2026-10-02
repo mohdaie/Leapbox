@@ -1,25 +1,43 @@
-# LeapBox Prototype 01
+# LeapBox 0.5.3: car mode for the Leapmotor C10
 
-This is an Android phone prototype for a Leapmotor C10 owner with the separate QDLink app already installed. It has two deliberately distinct modes:
+LeapBox shows your Android phone on the C10's screen through the car's built-in QDLink receiver, **without the QDLink phone app**. It talks to the car over USB (Android Open Accessory), completes the QDLink v2 handshake itself, and streams the phone screen as H.264.
 
-1. **QDLink mirror:** open QDLink, start its existing USB connection, return to LeapBox, and tap Waze. This mirrors the phone screen on the car, so whatever the phone displays is also shown on the car. QDLink itself keeps the phone awake during that session.
-2. **Separate-screen lab:** start a 1280 × 720 public virtual display containing a LeapBox dashboard. Its pixels go into a hardware H.264 encoder; a foreground service holds Android's `FULL_WAKE_LOCK`. The phone screen remains usable. Tap Waze in the lab to *request* that Android launch Waze on the virtual display. The diagnostics say whether the phone reports support, whether Android allows the request, and how many frames the virtual display encodes. After a successful request, confirm visually where Waze actually appears.
+While car mode runs:
 
-**The lab's video is not transmitted to the C10.** QDLink has no public API for another app to inject a virtual display stream. Completing a one-app USB connection requires implementing and testing QDLink's car-side handshake, message framing, touch input, and video transport on the actual C10. The existing APK was inspected to guide that future work, but is not bundled, patched, or redistributed here.
+- the phone screen is **mirrored** to the car (1920 × 882); the C10's touchscreen controls the phone directly, as with QDLink;
+- the phone is **locked to landscape**, which matches the car screen, so the picture fills it and touches line up;
+- the phone is **dimmed to minimum brightness** and, if allowed, Android's **Extra dim** is switched on at full strength (toggle on the car home screen); it is kept awake, since casting stops when the phone locks;
+- LeapBox shows a **car home screen** (warm dark theme, serif clock and greeting) with large tiles for the apps you choose: tap **Edit apps** to add or remove any installed app and **↑** to reorder. Until you choose, it shows Waze, Google Maps, YouTube, YouTube Music, Spotify, WhatsApp and Phone when installed;
+- a floating **LB** button on top of every other app returns to the LeapBox home screen (it hides while the home screen itself is showing).
 
-## Build and run
+Rotation and brightness are restored when car mode stops.
 
-- **Phone-only route:** put this project's *contents* at the root of a new GitHub repository named `leapbox`. Its included workflow builds a debug APK on every push to `main`. In the repository's **Actions** tab, open the latest successful **Build LeapBox Android APK** run and download the **LeapBox-Prototype-APK** artifact on your phone. Extract the APK from that artifact and install it.
-- Open this folder as a project in Android Studio with Android SDK 35 and JDK 17. Android Gradle Plugin 8.7.3 needs Gradle 8.9. A Gradle wrapper and compiled APK are **not** included because the current workspace has no Android SDK or Gradle installation and cannot reach the Android SDK download servers.
-- Sync dependencies and run the `app` configuration on an Android 10+ phone. For an APK, use **Build → Build Bundle(s) / APK(s) → Build APK(s)**.
-- Install Waze and your working QDLink APK on the phone. For the first mode, connect the USB cable, start mirroring in QDLink, then return to LeapBox.
-- For the second mode, press **Start second screen + full wake lock**, check the frame counter and display ID, then press **Try Waze on second screen**. Press **Return to LeapBox desktop** or **Stop second screen and release wake lock** when finished.
-- With the car's USB cable connected, press **Inspect connected car USB**. The app reports the detected accessory manufacturer, model and version without interfering with QDLink's connection.
+## Use
 
-## Boundaries of this prototype
+1. Once: in LeapBox allow **Modify system settings** (landscape + dim) and **Display over other apps** (LB button, and a tiny animation that keeps video flowing when the screen is static). Force-stop or disable the QDLink phone app.
+   Optional, for automatic Extra dim: connect the phone to a computer with USB debugging on and run `adb shell pm grant com.leapbox.prototype android.permission.WRITE_SECURE_SETTINGS` once (LeapBox's setup screen copies this command). The grant survives reboots; reinstalling LeapBox after uninstalling it needs it again.
+2. In the car: open QDLink on the car screen, plug in the USB cable, open LeapBox and tap **START CAR MODE**. In Android's pop-up choose **Entire screen**, then **Start**.
+3. Pick an app on the car screen. Tap **LB** to come back. **Stop** on the home screen or in the notification ends car mode.
 
-- It makes no claim that a C10 accepts the separate stream yet; the local H.264 counter only checks that the phone generated frames.
-- A virtual display is not automatically a physical car display. Android may decline third-party activity launches or put Waze on the primary phone screen. Runtime diagnostics show the request result, but only a real device visual test confirms placement.
-- A full wake lock keeps the display powered. The low-brightness control changes only the LeapBox phone window and may be overridden by the device. It never pretends the phone has been turned off.
-- The foreground service is user-started and user-stoppable; it releases its virtual display, encoder and wake lock when stopped.
-- The package identifier is `com.leapbox.prototype`. It neither replaces nor modifies QDLink.
+Android asks for casting permission each time car mode starts; an app cannot skip that.
+
+## Code
+
+- `CarService` — foreground media-projection service: mirrors the screen into a 1920 × 882 H.264 encoder, sends frames through `QdLinkUsbClient`, holds a dim screen wake lock, shows the LB button, applies and restores `PhoneTweaks`.
+- `QdLinkUsbClient` — the phone side of QDLink over USB: accessory discovery and permission, protocol detection (v2 `5A5A`, legacy v1 `!BIN` detected only), `CAR_INFO`/`PHONE_INFO` handshake, video packets, heartbeats.
+- `MainActivity` — setup screen (permissions, start, diagnostic log), the landscape car home screen and the app picker.
+- `HomeApps` — which apps the home screen shows, in order (saved on the phone).
+- `PhoneTweaks` — landscape lock, brightness and Extra dim via system/secure settings, with save/restore.
+- `Diag` — one copyable diagnostic log.
+- `Ui` — the warm colour palette and view helpers.
+
+## Build
+
+GitHub Actions builds a debug APK on every push to `main` or `claude/**`: open the latest **Build LeapBox Android APK** run and download the **LeapBox-Prototype-APK** artifact. Locally: Android Studio, Android SDK 35, JDK 17, Android Gradle Plugin 8.7.3 with Gradle 8.9 (no wrapper included).
+
+## Limits
+
+- Apps that only run in portrait (some messaging apps) appear narrow on the car and touches will not line up while they are open.
+- Minimum brightness is dim but not fully black on Samsung OLED screens; Extra dim makes it much darker. Placing the phone face down hides it completely (car touch still works).
+- Netflix, Astro GO, Disney+ and other DRM-protected video appear black on the car (sound still plays): these apps block screen capture, and Android enforces that for every mirroring method.
+- Package `com.leapbox.prototype`. It neither bundles nor modifies QDLink.
