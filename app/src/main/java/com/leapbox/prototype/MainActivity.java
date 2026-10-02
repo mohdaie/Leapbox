@@ -13,7 +13,6 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.view.View;
-import android.view.WindowManager;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -48,8 +47,16 @@ public final class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         buildInterface();
+        if (UsbManager.ACTION_USB_ACCESSORY_ATTACHED.equals(getIntent().getAction())) {
+            startLeapBox();
+        }
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (UsbManager.ACTION_USB_ACCESSORY_ATTACHED.equals(intent.getAction())) startLeapBox();
     }
 
     @Override protected void onStart() {
@@ -79,34 +86,33 @@ public final class MainActivity extends Activity {
         scroll.addView(root);
 
         root.addView(Ui.text(this, "LEAPBOX  /  PROTOTYPE 02", 13, Ui.BLUE, true));
-        root.addView(Ui.text(this, "Your road. Your screen.", 29, Ui.INK, true),
+        root.addView(Ui.text(this, "One phone. Two independent screens.", 29, Ui.INK, true),
                 Ui.block(this, 10));
         root.addView(Ui.text(this,
-                "Drive with your QDLink mirror. The independent car screen is an experiment and is off unless you start it.",
+                "LeapBox sends its own dashboard to the C10. Your physical phone screen is not captured and can be locked or used normally.",
                 16, Ui.MUTED, false), Ui.block(this, 8));
 
-        addSection(root, "01  DRIVE WITH QDLINK",
-                "Connect the USB cable, start mirroring in your QDLink app, return here, then tap Waze. This mirrors the phone on the C10.");
-        root.addView(action("Open QDLink", Ui.BLUE, () -> launchPackage("com.neusoft.qdrivelink")),
+        addSection(root, "01  LEAPBOX → C10",
+                "Open QDLink on the C10, connect the USB cable, then start LeapBox. Do not open the QDLink phone app; LeapBox now tries to own the QDriveLink USB accessory itself.");
+        root.addView(action("Start LeapBox car desktop", Ui.BLUE, this::startLeapBox),
                 Ui.block(this, 17));
-        root.addView(action("↗  Open Waze on phone", Ui.INK,
-                () -> launchPackage("com.waze")), Ui.block(this, 10));
-
-        addSection(root, "02  EXPERIMENTAL: INDEPENDENT C10 SCREEN",
-                "Not for driving yet. LeapBox takes the QDriveLink USB connection away from the QDLink app, so mirroring stops until you press Stop LeapBox and reconnect QDLink.");
-        root.addView(action("Start LeapBox car desktop", Ui.MUTED, this::startLeapBox),
-                Ui.block(this, 17));
-        root.addView(action("Reconnect LeapBox USB bridge", Ui.MUTED,
+        root.addView(action("Reconnect QDLink USB", Ui.MUTED,
                 () -> { if (screen != null) screen.reconnectCar(); else startLeapBox(); }), Ui.block(this, 10));
         root.addView(action("Inspect connected car USB", Ui.MUTED,
                 this::inspectUsb), Ui.block(this, 10));
-        root.addView(action("↗  Diagnostic: try normal Waze on car display", Ui.MUTED,
-                this::launchWazeOnSecond), Ui.block(this, 10));
+
+        addSection(root, "02  INDEPENDENT SCREEN TEST",
+                "The C10 should show the LeapBox desktop with one Waze icon. While it stays there, use ChatGPT, WhatsApp, Camera or anything else on the phone.");
+        root.addView(action("↗  Diagnostic: try normal Waze on car display", Ui.INK,
+                this::launchWazeOnSecond), Ui.block(this, 17));
         root.addView(action("Return car to LeapBox desktop", Ui.MUTED,
                 () -> { if (screen != null) screen.showDashboard(); refresh(); }),
                 Ui.block(this, 10));
-        root.addView(action("Stop LeapBox (give USB back to QDLink)", Ui.INK,
-                this::stopScreen), Ui.block(this, 10));
+
+        addSection(root, "03  PHONE INDEPENDENCE",
+                "LeapBox now uses a background partial wake lock. It keeps the projection engine alive without deliberately keeping your phone display on.");
+        root.addView(action("Stop LeapBox", Ui.INK,
+                this::stopScreen), Ui.block(this, 17));
 
         status = Ui.text(this, "Checking LeapBox service…", 14, Ui.INK, false);
         status.setPadding(Ui.dp(this, 17), Ui.dp(this, 17),
@@ -143,7 +149,7 @@ public final class MainActivity extends Activity {
     private void stopScreen() {
         if (screen != null) screen.stopPrototype();
         else stopService(new Intent(this, SecondScreenService.class));
-        tell("LeapBox stopped. Unplug and replug the cable, then start QDLink.");
+        tell("LeapBox stopped.");
         refresh();
     }
 
@@ -171,24 +177,11 @@ public final class MainActivity extends Activity {
         refresh();
     }
 
-    private void launchPackage(String packageName) {
-        Intent launch = getPackageManager().getLaunchIntentForPackage(packageName);
-        if (launch == null) {
-            tell(packageName.equals("com.waze") ? "Install Waze first." : "Install QDLink first.");
-            return;
-        }
-        try {
-            startActivity(launch);
-        } catch (RuntimeException error) {
-            tell("Could not open app: " + error.getClass().getSimpleName());
-        }
-    }
-
     private void refresh() {
         if (status == null) return;
         if (screen == null || !screen.isReady()) {
-            status.setText("Experimental car desktop: off\n"
-                    + "QDLink mirror: free to use the car USB connection\n" + accessoryStatus);
+            status.setText("LeapBox display: inactive\nPhone display: independent\n"
+                    + accessoryStatus + "\nStart LeapBox after opening QDLink on the C10.");
             return;
         }
         String canvas = screen.carWidth() > 0
